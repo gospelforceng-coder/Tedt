@@ -13,7 +13,7 @@ jobs:
 
     steps:    
       #################################################################    
-      # 1ï¸âƒ£ Configure Core RDP Settings    
+      # 1️⃣ Configure Core RDP Settings    
       #################################################################    
       - name: Configure Core RDP Settings    
         run: |    
@@ -25,7 +25,7 @@ jobs:
           Restart-Service -Name TermService -Force    
 
       #################################################################    
-      # 2ï¸âƒ£ Create RDP User    
+      # 2️⃣ Create RDP User    
       #################################################################    
       - name: Create RDP User with Secure Password    
         run: |    
@@ -52,7 +52,7 @@ jobs:
           echo "RDP_CREDS=$password" >> $env:GITHUB_ENV    
 
       #################################################################    
-      # 3ï¸âƒ£ Install Tailscale    
+      # 3️⃣ Install Tailscale    
       #################################################################    
       - name: Install Tailscale    
         run: |    
@@ -63,7 +63,7 @@ jobs:
           Remove-Item $file -Force    
 
       #################################################################    
-      # 4ï¸âƒ£ Connect Tailscale    
+      # 4️⃣ Connect Tailscale    
       #################################################################    
       - name: Establish Tailscale Connection    
         run: |    
@@ -78,7 +78,7 @@ jobs:
           echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV    
 
       #################################################################    
-      # 5ï¸âƒ£ Send Credentials to Telegram    
+      # 5️⃣ Send Credentials to Telegram    
       #################################################################    
       - name: Send Notification to Telegram    
         env:    
@@ -88,11 +88,11 @@ jobs:
           RDP_IP: ${{ env.TAILSCALE_IP }}    
         run: |    
           $message = @"
-          ðŸš€ <b>Universal RDP Ready</b>
+          🚀 <b>Universal RDP Ready</b>
 
-          ðŸŒ <b>IP:</b> <code>$($env:RDP_IP)</code>
-          ðŸ‘¤ <b>User:</b> <code>RDP</code>
-          ðŸ”‘ <b>Pass:</b> <code>$($env:RDP_PASS)</code>
+          🌐 <b>IP:</b> <code>$($env:RDP_IP)</code>
+          👤 <b>User:</b> <code>RDP</code>
+          🔑 <b>Pass:</b> <code>$($env:RDP_PASS)</code>
 
           <i>Check the Startup terminal to see your apps restoring.</i>
           "@
@@ -101,7 +101,7 @@ jobs:
           Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body    
 
       #################################################################    
-      # 6ï¸âƒ£ Install rclone    
+      # 6️⃣ Install rclone    
       #################################################################    
       - name: Install rclone    
         run: |    
@@ -110,7 +110,7 @@ jobs:
           Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"    
 
       #################################################################    
-      # 7ï¸âƒ£ Universal Persistence (FIXED WINGET AGREEMENTS)    
+      # 7️⃣ Universal Persistence (FIXED WINGET AGREEMENTS)    
       #################################################################    
       - name: Restore, Run, and Backup    
         env:    
@@ -124,7 +124,7 @@ jobs:
           if (!(Test-Path $workDir)) { New-Item $workDir -ItemType Directory -Force }
 
           # --- PHASE 1: RESTORE ---
-          Write-Host "ðŸ” Checking GDrive for state..." -ForegroundColor Yellow
+          Write-Host "🔍 Checking GDrive for state..." -ForegroundColor Yellow
           $exists = rclone lsf mydrive:rdp-backups/state.zip 2>$null
           
           if ($exists) {
@@ -132,7 +132,7 @@ jobs:
               Expand-Archive -Path $localZip -DestinationPath $workDir -Force
               rclone delete mydrive:rdp-backups/state.zip --drive-use-trash=true
           } else {
-              Write-Host "âš ï¸ No state.zip found. Starting with default settings." -ForegroundColor Cyan
+              Write-Host "⚠️ No state.zip found. Starting with default settings." -ForegroundColor Cyan
           }
 
           # A. Trigger Profile Creation  
@@ -153,10 +153,10 @@ jobs:
           
           $batContent = @"
           @echo off
-          echo ðŸš€ Initializing Environment...
+          echo 🚀 Initializing Environment...
           :: Force winget agreements and import filtered apps
           powershell -ExecutionPolicy Bypass -Command "winget source reset --force; if (Test-Path '$workDir\user_settings.reg') { reg import '$workDir\user_settings.reg' }; if (Test-Path '$workDir\apps.json') { winget import --import-file '$workDir\apps.json' --accept-package-agreements --accept-source-agreements --ignore-unavailable }"
-          echo âœ… Setup Complete.
+          echo ✅ Setup Complete.
           pause
           del "%~f0"
           "@
@@ -195,7 +195,7 @@ jobs:
           }
 
       #################################################################    
-      # 8ï¸âƒ£ Final Status    
+      # 8️⃣ Final Status    
       #################################################################  
       - name: Send Final Status to Telegram    
         if: always()    
@@ -204,7 +204,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}    
         run: |    
           $status = "${{ job.status }}"
-          $message = "ðŸ <b>Session Transitioned</b>`nStatus: <b>$status</b>"
+          $message = "🏁 <b>Session Transitioned</b>`nStatus: <b>$status</b>"
           $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"
           $body = @{ chat_id = $env:TELEGRAM_CHAT_ID; text = $message; parse_mode = "HTML" } | ConvertTo-Json
           Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body
