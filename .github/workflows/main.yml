@@ -7,28 +7,17 @@ on:
       - main
 
 jobs:
-
   secure-rdp:
 
     runs-on: windows-latest
 
-    # GitHub-hosted Windows runner limit is handled by ending
-    # our session before the hard limit.
-    timeout-minutes: 360
+    timeout-minutes: 3600
 
     steps:
 
-      # ==========================================================
-      # 1. CHECKOUT
-      # ==========================================================
-
-      - name: Checkout persistence system
-        uses: actions/checkout@v4
-
-
-      # ==========================================================
-      # 2. CONFIGURE RDP
-      # ==========================================================
+      # ============================================================
+      # 1. Configure Core RDP Settings
+      # ============================================================
 
       - name: Configure Core RDP Settings
         shell: powershell
@@ -67,13 +56,23 @@ jobs:
             -Force
 
 
-      # ==========================================================
-      # 3. CREATE RDP USER
-      # ==========================================================
+      # ============================================================
+      # 2. Checkout persistence code
+      # ============================================================
+
+      - name: Checkout persistence system
+        uses: actions/checkout@v4
+
+
+      # ============================================================
+      # 3. Create RDP User
+      # ============================================================
 
       - name: Create RDP User
         shell: powershell
         run: |
+
+          Add-Type -AssemblyName System.Security
 
           $charSet = @{
             Upper   = [char[]]"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -100,12 +99,13 @@ jobs:
             $charSet.Special |
             Get-Random -Count 4
 
-          $password = -join (
-            $rawPassword |
-            Sort-Object {
-              Get-Random
-            }
-          )
+          $password =
+            -join (
+              $rawPassword |
+              Sort-Object {
+                Get-Random
+              }
+            )
 
           $securePass =
             ConvertTo-SecureString `
@@ -132,12 +132,6 @@ jobs:
             Add-LocalGroupMember `
               -Group "Remote Desktop Users" `
               -Member "RDP"
-
-          } else {
-
-            Set-LocalUser `
-              -Name "RDP" `
-              -Password $securePass
           }
 
           "RDP_CREDS=$password" |
@@ -146,9 +140,9 @@ jobs:
               -Append
 
 
-      # ==========================================================
-      # 4. TAILSCALE
-      # ==========================================================
+      # ============================================================
+      # 4. Install Tailscale
+      # ============================================================
 
       - name: Install Tailscale
         shell: powershell
@@ -161,7 +155,7 @@ jobs:
             "$env:TEMP\tailscale.msi"
 
           Invoke-WebRequest `
-            -Uri $url `
+            $url `
             -OutFile $file
 
           Start-Process `
@@ -174,24 +168,25 @@ jobs:
             -Force
 
 
+      # ============================================================
+      # 5. Connect Tailscale
+      # ============================================================
+
       - name: Establish Tailscale Connection
         shell: powershell
         run: |
 
-          $tailscale =
-            "$env:ProgramFiles\Tailscale\tailscale.exe"
-
-          & $tailscale `
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" `
             up `
             --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
             --hostname=rdp-node
 
           $ip = $null
 
-          for ($i = 0; $i -lt 20; $i++) {
+          for ($i = 0; $i -lt 10; $i++) {
 
             $ip =
-              & $tailscale ip -4
+              & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
 
             if ($ip) {
               break
@@ -201,7 +196,7 @@ jobs:
           }
 
           if (!$ip) {
-            throw "Tailscale did not obtain an IPv4 address."
+            exit 1
           }
 
           "TAILSCALE_IP=$ip" |
@@ -210,756 +205,211 @@ jobs:
               -Append
 
 
-      # ==========================================================
-      # 5. TELEGRAM
-      #
-      # IMPORTANT:
-      #
-      # Windows PowerShell 5.1 does not necessarily have
-      # System.Net.Http loaded.
-      #
-      # We explicitly load the assembly.
-      #
-      # UTF-8 bytes are then sent directly to Telegram.
-      # ==========================================================
-
-      - name: Send RDP Ready Notification
-        shell: powershell
-
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-        run: |
-
-          # ------------------------------------------------------
-          # Explicitly load System.Net.Http
-          # ------------------------------------------------------
-
-          Add-Type `
-            -AssemblyName System.Net.Http
-
-          # ------------------------------------------------------
-          # Construct Telegram message
-          # ------------------------------------------------------
-
-          $message = @"
-🚀 <b>Universal RDP Ready</b>
-
-🌐 <b>IP:</b> <code>$env:TAILSCALE_IP</code>
-👤 <b>User:</b> <code>RDP</code>
-🔑 <b>Pass:</b> <code>$env:RDP_CREDS</code>
-
-<i>Restoring your previous environment...</i>
-"@
-
-          $payload = @{
-            chat_id    = $env:TELEGRAM_CHAT_ID
-            text       = $message
-            parse_mode = "HTML"
-          }
-
-          $json =
-            $payload |
-            ConvertTo-Json -Depth 10
-
-          # ------------------------------------------------------
-          # Force UTF-8
-          # ------------------------------------------------------
-
-          $bytes =
-            [System.Text.Encoding]::UTF8.GetBytes($json)
-
-          # ------------------------------------------------------
-          # Create HttpClient
-          # ------------------------------------------------------
-
-          $client =
-            New-Object System.Net.Http.HttpClient
-
-          $content =
-            New-Object System.Net.Http.ByteArrayContent($bytes)
-
-          try {
-
-            $content.Headers.ContentType =
-              New-Object `
-                System.Net.Http.Headers.MediaTypeHeaderValue(
-                  "application/json"
-                )
-
-            $content.Headers.ContentType.CharSet =
-              "utf-8"
-
-            $uri =
-              "https://api.telegram.org/bot$env:TELEGRAM_TOKEN/sendMessage"
-
-            Write-Host "Sending Telegram notification..."
-
-            $response =
-              $client.PostAsync(
-                $uri,
-                $content
-              ).GetAwaiter().GetResult()
-
-            $responseBody =
-              $response.Content.
-              ReadAsStringAsync().
-              GetAwaiter().
-              GetResult()
-
-            Write-Host "Telegram response:"
-            Write-Host $responseBody
-
-            if (!$response.IsSuccessStatusCode) {
-
-              throw `
-                "Telegram request failed: $responseBody"
-            }
-
-          }
-          finally {
-
-            $content.Dispose()
-            $client.Dispose()
-          }
-
-
-      # ==========================================================
-      # 6. RCLONE
-      # ==========================================================
+      # ============================================================
+      # 6. Install rclone
+      # ============================================================
 
       - name: Install rclone
         shell: powershell
         run: |
 
-          $zip =
-            "$env:TEMP\rclone.zip"
-
-          $extract =
-            "$env:TEMP\rclone_extract"
-
           Invoke-WebRequest `
-            -Uri "https://downloads.rclone.org/rclone-current-windows-amd64.zip" `
-            -OutFile $zip
-
-          if (Test-Path $extract) {
-
-            Remove-Item `
-              $extract `
-              -Recurse `
-              -Force
-          }
+            "https://downloads.rclone.org/rclone-current-windows-amd64.zip" `
+            -OutFile "rclone.zip"
 
           Expand-Archive `
-            -Path $zip `
-            -DestinationPath $extract `
+            "rclone.zip" `
+            -DestinationPath $env:TEMP `
             -Force
 
-          $rclone =
-            Get-ChildItem `
-              $extract `
-              -Recurse `
-              -Filter "rclone.exe" |
-            Select-Object -First 1
-
-          if (!$rclone) {
-
-            throw `
-              "rclone.exe was not found."
-          }
-
           Copy-Item `
-            $rclone.FullName `
+            "$env:TEMP\rclone*\rclone.exe" `
             "C:\Windows\System32\rclone.exe" `
             -Force
 
-          rclone version
 
+      # ============================================================
+      # 7. Send RDP credentials
+      # ============================================================
 
-      # ==========================================================
-      # 7. CREATE PERSISTENCE DIRECTORIES
-      # ==========================================================
-
-      - name: Prepare persistence directories
+      - name: Send Notification to Telegram
         shell: powershell
-        run: |
-
-          $directories = @(
-            "D:\RDPState",
-            "D:\RDPState\baseline",
-            "D:\RDPState\restore",
-            "D:\RDPState\stage",
-            "D:\RDPState\checkpoints"
-          )
-
-          foreach ($directory in $directories) {
-
-            if (!(Test-Path $directory)) {
-
-              New-Item `
-                -Path $directory `
-                -ItemType Directory `
-                -Force |
-                Out-Null
-            }
-          }
-
-
-      # ==========================================================
-      # 8. CAPTURE BASELINE
-      #
-      # This must happen BEFORE user-state restoration.
-      # ==========================================================
-
-      - name: Capture fresh runner baseline
-        shell: powershell
-        run: |
-
-          if (Test-Path `
-            "$env:GITHUB_WORKSPACE\persistence\capture-baseline.ps1") {
-
-            powershell `
-              -NoProfile `
-              -ExecutionPolicy Bypass `
-              -File `
-              "$env:GITHUB_WORKSPACE\persistence\capture-baseline.ps1" `
-              -OutputPath `
-              "D:\RDPState\baseline\baseline.json"
-
-          } else {
-
-            Write-Host `
-              "capture-baseline.ps1 not found."
-
-            Write-Host `
-              "Baseline capture will be skipped."
-          }
-
-
-      # ==========================================================
-      # 9. RESTORE PREVIOUS STATE
-      # ==========================================================
-
-      - name: Restore previous environment
-        shell: powershell
-
-        env:
-          RCLONE_CONFIG_MYDRIVE_TYPE: "drive"
-          RCLONE_CONFIG_MYDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
-
-        run: |
-
-          if (Test-Path `
-            "$env:GITHUB_WORKSPACE\persistence\restore.ps1") {
-
-            powershell `
-              -NoProfile `
-              -ExecutionPolicy Bypass `
-              -File `
-              "$env:GITHUB_WORKSPACE\persistence\restore.ps1" `
-              -RemoteRoot `
-              "mydrive:rdp-backups" `
-              -LocalRoot `
-              "D:\RDPState\restore" `
-              -UserName `
-              "RDP" `
-              -UserPassword `
-              "$env:RDP_CREDS"
-
-          } else {
-
-            Write-Host `
-              "No restore.ps1 found."
-
-            Write-Host `
-              "Starting without previous state."
-          }
-
-
-      # ==========================================================
-      # 10. RESTORATION COMPLETE
-      # ==========================================================
-
-      - name: Notify restoration complete
-        shell: powershell
-
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RDP_PASS: ${{ env.RDP_CREDS }}
+          RDP_IP: ${{ env.TAILSCALE_IP }}
 
         run: |
-
-          Add-Type `
-            -AssemblyName System.Net.Http
 
           $message = @"
-✅ <b>RDP Environment Restored</b>
+          🚀 <b>Universal RDP Ready</b>
 
-🖥️ <b>IP:</b> <code>$env:TAILSCALE_IP</code>
-👤 <b>User:</b> <code>RDP</code>
+          🌐 <b>IP:</b> <code>$env:RDP_IP</code>
+          👤 <b>User:</b> <code>RDP</code>
+          🔑 <b>Pass:</b> <code>$env:RDP_PASS</code>
 
-Your persistent environment has been restored.
+          <i>Restoring your previous environment...</i>
+          "@
 
-⏱️ Automatic checkpoint:
-<b>5 hours 30 minutes</b>
-"@
+          $url =
+            "https://api.telegram.org/bot$env:TELEGRAM_TOKEN/sendMessage"
 
-          $payload = @{
-            chat_id    = $env:TELEGRAM_CHAT_ID
-            text       = $message
+          $bodyJson = @{
+            chat_id = $env:TELEGRAM_CHAT_ID
+            text = $message
             parse_mode = "HTML"
-          }
+          } |
+          ConvertTo-Json -Compress
 
-          $json =
-            $payload |
-            ConvertTo-Json -Depth 10
+          $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyJson)
 
-          $bytes =
-            [System.Text.Encoding]::UTF8.GetBytes($json)
-
-          $client =
-            New-Object System.Net.Http.HttpClient
-
-          $content =
-            New-Object System.Net.Http.ByteArrayContent($bytes)
-
-          try {
-
-            $content.Headers.ContentType =
-              New-Object `
-                System.Net.Http.Headers.MediaTypeHeaderValue(
-                  "application/json"
-                )
-
-            $content.Headers.ContentType.CharSet =
-              "utf-8"
-
-            $uri =
-              "https://api.telegram.org/bot$env:TELEGRAM_TOKEN/sendMessage"
-
-            $response =
-              $client.PostAsync(
-                $uri,
-                $content
-              ).GetAwaiter().GetResult()
-
-            $body =
-              $response.Content.
-              ReadAsStringAsync().
-              GetAwaiter().
-              GetResult()
-
-            Write-Host $body
-
-            if (!$response.IsSuccessStatusCode) {
-
-              throw `
-                "Telegram notification failed: $body"
-            }
-
-          }
-          finally {
-
-            $content.Dispose()
-            $client.Dispose()
-          }
+          Invoke-RestMethod `
+            -Uri $url `
+            -Method Post `
+            -ContentType "application/json; charset=utf-8" `
+            -Body $bodyBytes
 
 
-      # ==========================================================
-      # 11. RDP SESSION TIMER
-      # ==========================================================
+      # ============================================================
+      # 8. Capture clean runner baseline
+      # ============================================================
 
-      - name: Run RDP session
+      - name: Capture fresh Windows baseline
         shell: powershell
         run: |
-
-          $sessionStart =
-            Get-Date
-
-          # 5 hours 30 minutes.
-          #
-          # 30 minutes are intentionally reserved for:
-          #
-          #   backup
-          #   compression
-          #   upload
-          #   verification
-          #   next workflow dispatch
-          #
-
-          $checkpointMinutes =
-            330
-
-          Write-Host ""
-          Write-Host "======================================="
-          Write-Host "RDP SESSION ACTIVE"
-          Write-Host "Checkpoint: $checkpointMinutes minutes"
-          Write-Host "======================================="
-          Write-Host ""
-
-          $lastMinute = -1
-
-          while ($true) {
-
-            $elapsed =
-              [math]::Floor(
-                (
-                  New-TimeSpan `
-                    -Start $sessionStart `
-                    -End (Get-Date)
-                ).TotalMinutes
-              )
-
-            if (
-              $elapsed -ne $lastMinute -and
-              (
-                $elapsed % 5 -eq 0 -or
-                $elapsed -ge 325
-              )
-            ) {
-
-              $remaining =
-                $checkpointMinutes - $elapsed
-
-              Write-Host `
-                "RDP Active | $elapsed minutes elapsed | $remaining minutes remaining"
-
-              $lastMinute =
-                $elapsed
-            }
-
-            if ($elapsed -ge $checkpointMinutes) {
-
-              break
-            }
-
-            Start-Sleep `
-              -Seconds 30
-          }
-
-          Write-Host ""
-          Write-Host `
-            "CHECKPOINT WINDOW REACHED" `
-            -ForegroundColor Yellow
-
-
-      # ==========================================================
-      # 12. CHECKPOINT
-      # ==========================================================
-
-      - name: Create persistence checkpoint
-        shell: powershell
-
-        env:
-          RCLONE_CONFIG_MYDRIVE_TYPE: "drive"
-          RCLONE_CONFIG_MYDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
-
-        run: |
-
-          if (!(Test-Path `
-            "$env:GITHUB_WORKSPACE\persistence\checkpoint.ps1")) {
-
-            throw `
-              "checkpoint.ps1 was not found."
-          }
 
           powershell `
             -NoProfile `
             -ExecutionPolicy Bypass `
-            -File `
-            "$env:GITHUB_WORKSPACE\persistence\checkpoint.ps1" `
-            -RemoteRoot `
-            "mydrive:rdp-backups" `
-            -StageRoot `
-            "D:\RDPState\stage" `
-            -LocalCheckpointRoot `
-            "D:\RDPState\checkpoints" `
-            -UserName `
-            "RDP" `
-            -UserPassword `
-            "$env:RDP_CREDS"
+            -File "$env:GITHUB_WORKSPACE\persistence\capture-baseline.ps1"
 
 
-      # ==========================================================
-      # 13. VERIFY CHECKPOINT
-      # ==========================================================
+      # ============================================================
+      # 9. Restore previous RDP state
+      # ============================================================
 
-      - name: Verify checkpoint
+      - name: Restore previous RDP environment
         shell: powershell
-
         env:
           RCLONE_CONFIG_MYDRIVE_TYPE: "drive"
           RCLONE_CONFIG_MYDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
 
         run: |
 
-          Write-Host `
-            "Reading current checkpoint metadata..."
-
-          $current =
-            rclone cat `
-              "mydrive:rdp-backups/current.json"
-
-          if (!$current) {
-
-            throw `
-              "current.json was not found."
-          }
-
-          Write-Host $current
-
-          $metadata =
-            $current |
-            ConvertFrom-Json
-
-          if ($metadata.status -ne "READY") {
-
-            throw `
-              "Checkpoint is not READY."
-          }
-
-          if (!$metadata.generation) {
-
-            throw `
-              "Checkpoint generation is missing."
-          }
-
-          $generation =
-            "{0:D6}" -f `
-              [int]$metadata.generation
-
-          Write-Host ""
-          Write-Host `
-            "Verified generation: $generation"
-
-          rclone lsf `
-            "mydrive:rdp-backups/generations/$generation/" `
-            --max-depth 1
-
-          if ($LASTEXITCODE -ne 0) {
-
-            throw `
-              "Checkpoint generation could not be verified."
-          }
+          powershell `
+            -NoProfile `
+            -ExecutionPolicy Bypass `
+            -File "$env:GITHUB_WORKSPACE\persistence\restore.ps1" `
+            -RemoteRoot "mydrive:rdp-backups" `
+            -UserName "RDP" `
+            -UserPassword "$env:RDP_CREDS"
 
 
-      # ==========================================================
-      # 14. START NEXT RDP
-      # ==========================================================
+      # ============================================================
+      # 10. RDP session is now ready
+      # ============================================================
 
-      - name: Start next RDP session
+      - name: Notify Environment Ready
         shell: powershell
-
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-
-        run: |
-
-          if (!$env:GH_PAT) {
-
-            throw `
-              "GH_PAT secret is missing."
-          }
-
-          $repository =
-            "${{ github.repository }}"
-
-          $workflow =
-            "rdp.yml"
-
-          $uri =
-            "https://api.github.com/repos/$repository/actions/workflows/$workflow/dispatches"
-
-          $headers = @{
-            Authorization =
-              "Bearer $env:GH_PAT"
-
-            Accept =
-              "application/vnd.github+json"
-
-            "X-GitHub-Api-Version" =
-              "2022-11-28"
-
-            "User-Agent" =
-              "RDP-Persistence"
-          }
-
-          $body =
-            @{
-              ref = "main"
-            } |
-            ConvertTo-Json
-
-          Add-Type `
-            -AssemblyName System.Net.Http
-
-          $bytes =
-            [System.Text.Encoding]::UTF8.GetBytes($body)
-
-          $client =
-            New-Object System.Net.Http.HttpClient
-
-          try {
-
-            foreach ($header in $headers.GetEnumerator()) {
-
-              $client.DefaultRequestHeaders.
-                TryAddWithoutValidation(
-                  $header.Key,
-                  $header.Value
-                ) |
-                Out-Null
-            }
-
-            $content =
-              New-Object System.Net.Http.ByteArrayContent($bytes)
-
-            $content.Headers.ContentType =
-              New-Object `
-                System.Net.Http.Headers.MediaTypeHeaderValue(
-                  "application/json"
-                )
-
-            $content.Headers.ContentType.CharSet =
-              "utf-8"
-
-            $response =
-              $client.PostAsync(
-                $uri,
-                $content
-              ).GetAwaiter().GetResult()
-
-            $responseBody =
-              $response.Content.
-              ReadAsStringAsync().
-              GetAwaiter().
-              GetResult()
-
-            Write-Host `
-              "GitHub dispatch status: $($response.StatusCode)"
-
-            if ($responseBody) {
-
-              Write-Host $responseBody
-            }
-
-            if (!$response.IsSuccessStatusCode) {
-
-              throw `
-                "Failed to dispatch next workflow: $responseBody"
-            }
-
-          }
-          finally {
-
-            if ($content) {
-              $content.Dispose()
-            }
-
-            $client.Dispose()
-          }
-
-          Write-Host ""
-          Write-Host `
-            "NEXT RDP SESSION DISPATCHED" `
-            -ForegroundColor Green
-
-
-      # ==========================================================
-      # 15. FINAL TELEGRAM STATUS
-      # ==========================================================
-
-      - name: Send final transition notification
-        if: always()
-        shell: powershell
-
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
         run: |
 
-          Add-Type `
-            -AssemblyName System.Net.Http
+          $message = @"
+          ✅ <b>RDP Environment Restored</b>
 
-          $status =
-            "${{ job.status }}"
+          Your previous files, application configurations,
+          presets and mapped software have been restored.
 
-          if ($status -eq "success") {
+          🖥️ <b>IP:</b> <code>${{ env.TAILSCALE_IP }}</code>
+          👤 <b>User:</b> <code>RDP</code>
+          "@
 
-            $message = @"
-🔄 <b>RDP Session Transitioned</b>
+          $url =
+            "https://api.telegram.org/bot$env:TELEGRAM_TOKEN/sendMessage"
 
-✅ State checkpoint created
-✅ Remote checkpoint verified
-✅ Next RDP workflow dispatched
-
-The next runner will restore the latest READY generation.
-"@
-
-          } else {
-
-            $message = @"
-⚠️ <b>RDP Transition Failed</b>
-
-Status:
-<code>$status</code>
-
-The previous successfully published checkpoint has not been deleted.
-"@
-          }
-
-          $payload = @{
-            chat_id    = $env:TELEGRAM_CHAT_ID
-            text       = $message
+          $bodyJson = @{
+            chat_id = $env:TELEGRAM_CHAT_ID
+            text = $message
             parse_mode = "HTML"
-          }
+          } |
+          ConvertTo-Json -Compress
 
-          $json =
-            $payload |
-            ConvertTo-Json -Depth 10
+          $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyJson)
 
-          $bytes =
-            [System.Text.Encoding]::UTF8.GetBytes($json)
+          Invoke-RestMethod `
+            -Uri $url `
+            -Method Post `
+            -ContentType "application/json; charset=utf-8" `
+            -Body $bodyBytes
 
-          $client =
-            New-Object System.Net.Http.HttpClient
 
-          $content =
-            New-Object System.Net.Http.ByteArrayContent($bytes)
+      # ============================================================
+      # 11. CHECKPOINT
+      #
+      # This is deliberately separate from restoration.
+      # The next iteration will turn this into the timed transition
+      # controller.
+      # ============================================================
 
-          try {
+      - name: Create RDP checkpoint
+        shell: powershell
+        env:
+          RCLONE_CONFIG_MYDRIVE_TYPE: "drive"
+          RCLONE_CONFIG_MYDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
 
-            $content.Headers.ContentType =
-              New-Object `
-                System.Net.Http.Headers.MediaTypeHeaderValue(
-                  "application/json"
-                )
+        run: |
 
-            $content.Headers.ContentType.CharSet =
-              "utf-8"
+          powershell `
+            -NoProfile `
+            -ExecutionPolicy Bypass `
+            -File "$env:GITHUB_WORKSPACE\persistence\checkpoint.ps1" `
+            -RemoteRoot "mydrive:rdp-backups" `
+            -UserName "RDP" `
+            -UserPassword "$env:RDP_CREDS"
 
-            $uri =
-              "https://api.telegram.org/bot$env:TELEGRAM_TOKEN/sendMessage"
 
-            $response =
-              $client.PostAsync(
-                $uri,
-                $content
-              ).GetAwaiter().GetResult()
+      # ============================================================
+      # 12. Final status
+      # ============================================================
 
-            $body =
-              $response.Content.
-              ReadAsStringAsync().
-              GetAwaiter().
-              GetResult()
+      - name: Send Final Status
+        if: always()
+        shell: powershell
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-            Write-Host $body
+        run: |
 
-          }
-          finally {
+          $status = "${{ job.status }}"
 
-            $content.Dispose()
-            $client.Dispose()
-          }
+          $message = @"
+          🏁 <b>RDP Session Finished</b>
+
+          Status: <b>$status</b>
+
+          Persistent checkpoint has been created
+          when the checkpoint stage completed successfully.
+          "@
+
+          $url =
+            "https://api.telegram.org/bot$env:TELEGRAM_TOKEN/sendMessage"
+
+          $bodyJson = @{
+            chat_id = $env:TELEGRAM_CHAT_ID
+            text = $message
+            parse_mode = "HTML"
+          } |
+          ConvertTo-Json -Compress
+
+          $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyJson)
+
+          Invoke-RestMethod `
+            -Uri $url `
+            -Method Post `
+            -ContentType "application/json; charset=utf-8" `
+            -Body $bodyBytes
