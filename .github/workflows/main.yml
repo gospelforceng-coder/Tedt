@@ -1,4 +1,4 @@
-name: RDP Persistence Workflow
+name: RDP
 
 on:
   workflow_dispatch:
@@ -93,12 +93,12 @@ jobs:
           $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)    
           Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job
 
-          # 2. Capture baseline using absolute workspace script path
-          $captureScript = Join-Path $env:GITHUB_WORKSPACE "scripts\capture-baseline.ps1"
+          # 2. Capture baseline using workspace persistence folder path
+          $captureScript = Join-Path $env:GITHUB_WORKSPACE "persistence\capture-baseline.ps1"
           powershell -ExecutionPolicy Bypass -File "$captureScript" -OutputPath "D:\RDPState\baseline.json"
 
-          # 3. Restore state using absolute workspace script path
-          $restoreScript = Join-Path $env:GITHUB_WORKSPACE "scripts\restore-state.ps1"
+          # 3. Restore state using workspace persistence folder path
+          $restoreScript = Join-Path $env:GITHUB_WORKSPACE "persistence\restore-state.ps1"
           powershell -ExecutionPolicy Bypass -File "$restoreScript" `
             -RemoteRoot "mydrive:rdp-backups" `
             -LocalRoot "D:\RDPState\restore" `
@@ -160,7 +160,7 @@ jobs:
             if ($elapsed -ge 330) {    
               Write-Host "⏳ Cutoff reached. Executing ReWin Checkpoint Backup..." -ForegroundColor Yellow
               
-              $backupScript = Join-Path $env:GITHUB_WORKSPACE "scripts\backup-state.ps1"
+              $backupScript = Join-Path $env:GITHUB_WORKSPACE "persistence\backup-state.ps1"
               powershell -ExecutionPolicy Bypass -File "$backupScript" `
                 -ReWinRoot "D:\RDPState\tools\ReWin" `
                 -StageRoot "D:\RDPState\stage" `
