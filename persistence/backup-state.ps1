@@ -11,12 +11,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-if (!$ReWinRoot) {
-    $ReWinRoot = Join-Path $scriptDir "..\tools\ReWin"
-}
-if (Test-Path $ReWinRoot) {
-    $ReWinRoot = (Resolve-Path $ReWinRoot).Path
-}
+if (!$ReWinRoot) { $ReWinRoot = Join-Path $scriptDir "..\tools\ReWin" }
+if (Test-Path $ReWinRoot) { $ReWinRoot = (Resolve-Path $ReWinRoot).Path }
 
 $scanner = Join-Path $ReWinRoot "src\scanner\main_scanner.ps1"
 if (!(Test-Path $scanner)) { throw "ReWin scanner not found at $scanner" }
@@ -48,10 +44,12 @@ $stage = Join-Path $StageRoot $generationName
 $rewinOut = Join-Path $stage "rewin"
 $userOut = Join-Path $stage "user-data"
 $toolsOut = Join-Path $stage "installed-tools\Software"
+$installersOut = Join-Path $stage "installed-tools\installers"
 
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Directory $rewinOut
 New-Directory $userOut
+New-Directory $installersOut
 
 Write-Host "==============================================" -ForegroundColor Cyan
 Write-Host "       CREATING CHECKPOINT $generationName" -ForegroundColor Cyan
@@ -80,16 +78,12 @@ Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
 
 # Flatten ReWin Scan Directory Output
 $scan = Get-ChildItem $rewinOut -Directory -Filter "Scan_*" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (!$scan) { throw "ReWin scan did not produce a Scan_* output directory." }
-
-Get-ChildItem $scan.FullName -Force | ForEach-Object {
-    Move-Item -Path $_.FullName -Destination $rewinOut -Force
+if ($scan) {
+    Get-ChildItem $scan.FullName -Force | ForEach-Object {
+        Move-Item -Path $_.FullName -Destination $rewinOut -Force
+    }
+    Remove-Item $scan.FullName -Recurse -Force -ErrorAction SilentlyContinue
 }
-Remove-Item $scan.FullName -Recurse -Force -ErrorAction SilentlyContinue
-
-# Remove Sensitivities
-$licenseFile = Join-Path $rewinOut "license_keys.json"
-if (Test-Path $licenseFile) { Remove-Item $licenseFile -Force }
 
 # 2. Validate ReWin Outputs
 Write-Host "[2/6] Validating ReWin output..." -ForegroundColor Yellow
@@ -114,8 +108,8 @@ $package = [ordered]@{
 }
 $package | ConvertTo-Json -Depth 12 | Set-Content (Join-Path $rewinOut "migration_package.json") -Encoding UTF8
 
-# 4. Copy User Data & D:\ Drive Portable Apps
-Write-Host "[4/6] Backing up user files and D:\Software..." -ForegroundColor Yellow
+# 4. Copy User Files & Capture Web Downloaded Setup Installers
+Write-Host "[4/6] Backing up user files and setup installers..." -ForegroundColor Yellow
 $profile = "C:\Users\$UserName"
 $paths = @{
     Desktop   = Join-Path $profile "Desktop"
@@ -131,9 +125,23 @@ foreach ($name in $paths.Keys) {
     }
 }
 
+# Copy Portable Software from D:\Software
 if (Test-Path "D:\Software") {
-    Write-Host "Backing up portable software from D:\Software..." -ForegroundColor Gray
+    Write-Host "Backing up portable applications from D:\Software..." -ForegroundColor Gray
     Copy-Tree "D:\Software" $toolsOut
+}
+
+# Find standalone installer files in Downloads / Desktop to auto-execute on restore
+$searchFolders = @(Join-Path $profile "Downloads", Join-Path $profile "Desktop")
+foreach ($folder in $searchFolders) {
+    if (Test-Path $folder) {
+        Get-ChildItem -Path $folder -Include "*.exe", "*.msi" -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+            if ($_.Name -match "(setup|install|installer|vscode|cursor|blender|figma|android|studio|adobe)" -or $_.Length -gt 10MB) {
+                Write-Host "Captured setup installer: $($_.Name)" -ForegroundColor Gray
+                Copy-Item -Path $_.FullName -Destination $installersOut -Force
+            }
+        }
+    }
 }
 
 # 5. Save Software State
@@ -151,7 +159,7 @@ $softwareState = @(
 )
 $softwareState | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $stage "software-state.json") -Encoding UTF8
 
-# 6. Build Manifest, Compress Zip, and Upload
+# 6. Publish Checkpoint
 Write-Host "[6/6] Publishing Checkpoint..." -ForegroundColor Yellow
 $manifest = [ordered]@{
     schemaVersion  = 1
@@ -168,9 +176,7 @@ New-Directory $zipDir
 $zip = Join-Path $zipDir "$generationName.zip"
 Compress-Archive -Path "$stage\*" -DestinationPath $zip -CompressionLevel Optimal -Force
 
-# Upload archive zip FIRST (Fast target for restore)
 & rclone copyto $zip "$RemoteRoot/archives/$generationName.zip" --quiet
-# Upload loose generation folder as fallback
 & rclone copy $stage "$RemoteRoot/generations/$generationName" --quiet
 
 $current = [ordered]@{
