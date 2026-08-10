@@ -52,9 +52,9 @@ jobs:
           echo "RDP_CREDS=$password" >> $env:GITHUB_ENV
 
       #################################################################        
-      # 3️⃣ Environment Tooling & ReWin Integration
+      # 3️⃣ Environment Tooling & ReWin Integration (Lightweight)
       #################################################################        
-      - name: Install Tooling & Clone ReWin
+      - name: Install Essential Tooling & Clone ReWin
         run: |
           # Install RClone
           Invoke-WebRequest https://downloads.rclone.org/rclone-current-windows-amd64.zip -OutFile rclone.zip        
@@ -68,16 +68,13 @@ jobs:
           Start-Process msiexec.exe -ArgumentList "/i `"$file`" /quiet /norestart" -Wait        
           Remove-Item $file -Force
 
-          # Baseline RDP Software
+          # Install Python 3.11 for ReWin scripts
           winget install --id Python.Python.3.11 --exact --silent --accept-source-agreements --accept-package-agreements        
-          winget install --id Nvidia.CUDA --silent --accept-source-agreements --accept-package-agreements        
           $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")        
-          python -m pip install --upgrade pip        
-          python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 
           # Clone ReWin framework into target tools path
           New-Item -ItemType Directory -Path "D:\RDPState\tools" -Force | Out-Null
-          git clone https://github.com/Jany-M/ReWin.git "D:\RDPState\tools\ReWin"
+          git clone https://github.com/Jany-M/ReWin.git "D:\RDPState\tools\ReWin[span_0](start_span)"[span_0](end_span)
 
       #################################################################        
       # 4️⃣ Capture Baseline & Run State Restore
