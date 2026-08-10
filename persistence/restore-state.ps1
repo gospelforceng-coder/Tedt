@@ -10,12 +10,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-if (!$ReWinRoot) {
-    $ReWinRoot = Join-Path $scriptDir "..\tools\ReWin"
-}
-if (Test-Path $ReWinRoot) {
-    $ReWinRoot = (Resolve-Path $ReWinRoot).Path
-}
+if (!$ReWinRoot) { $ReWinRoot = Join-Path $scriptDir "..\tools\ReWin" }
+if (Test-Path $ReWinRoot) { $ReWinRoot = (Resolve-Path $ReWinRoot).Path }
 
 if (!(Get-Command rclone -ErrorAction SilentlyContinue)) {
     throw "rclone is not installed."
@@ -32,6 +28,33 @@ function Copy-Tree {
     New-Directory $Destination
     robocopy $Source $Destination /E /XJ /R:1 /W:1 /MT:16 /NP /NFL /NDL | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "Robocopy failed: $Source" }
+}
+
+function Invoke-SilentInstaller {
+    param([string]$FilePath)
+    $ext = [System.IO.Path]::GetExtension($FilePath).ToLower()
+    Write-Host "Executing custom installer: $(Split-Path $FilePath -Leaf)..." -ForegroundColor Yellow
+
+    if ($ext -eq ".msi") {
+        Start-Process "msiexec.exe" -ArgumentList "/i `"$FilePath`" /qn /norestart" -Wait -NoNewWindow
+    } elseif ($ext -eq ".exe") {
+        # Tries standard silent switches: InnoSetup (/VERYSILENT), NSIS (/S), InstallShield (/s)
+        $switches = @("/VERYSILENT /NORESTART /ALLUSERS", "/S", "/s", "/silent", "/q")
+        $installed = $false
+
+        foreach ($sw in $switches) {
+            $p = Start-Process -FilePath $FilePath -ArgumentList $sw -PassThru -NoNewWindow
+            $p | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue
+            if ($p.HasExited -and $p.ExitCode -eq 0) {
+                $installed = $true
+                break
+            }
+        }
+        if (!$installed) {
+            # Fallback execution if silent flags exit with errors
+            Start-Process -FilePath $FilePath -ArgumentList "/S" -Wait -NoNewWindow
+        }
+    }
 }
 
 Write-Host "==============================================" -ForegroundColor Cyan
@@ -72,36 +95,15 @@ if (Test-Path $archiveZip) {
 
 # 3. Validate Checkpoint
 Write-Host "[3/7] Validating checkpoint..." -ForegroundColor Yellow
-$requiredFiles = @("checkpoint.json", "software-state.json", "rewin\migration_package.json", "rewin\software_inventory.json", "rewin\package_mappings.json", "rewin\config_backup.json")
+$requiredFiles = @("checkpoint.json", "software-state.json", "rewin\migration_package.json")
 foreach ($file in $requiredFiles) {
     if (!(Test-Path (Join-Path $generationDir $file))) {
         throw "Required checkpoint file missing: $file"
     }
 }
 
-# 4. Determine Additional Software
-Write-Host "[4/7] Determining additional software..." -ForegroundColor Yellow
-$softwareState = Get-Content (Join-Path $generationDir "software-state.json") -Raw | ConvertFrom-Json
-$baselinePath = "D:\RDPState\baseline.json"
-$baseline = $null
-
-if (Test-Path $baselinePath) {
-    $baseline = Get-Content $baselinePath -Raw | ConvertFrom-Json
-}
-
-$additionalSoftware = @(
-    $softwareState | Where-Object {
-        $app = $_
-        if ($baseline) {
-            if ($app.wingetId -and ($baseline.wingetList -match [regex]::Escape($app.wingetId))) { return $false }
-            if ($app.name -and ($baseline.wingetList -match [regex]::Escape($app.name))) { return $false }
-        }
-        return $true
-    }
-)
-
-# 5. Restore Portable Software to Drive D:\ & Install Winget/Choco Packages
-Write-Host "[5/7] Restoring software..." -ForegroundColor Yellow
+# 4. Restore Portable Apps (D:\Software) & Silent Custom Installers
+Write-Host "[4/7] Restoring portable apps and running installer packages..." -ForegroundColor Yellow
 
 $portableSource = Join-Path $generationDir "installed-tools\Software"
 if (Test-Path $portableSource) {
@@ -112,9 +114,31 @@ if (Test-Path $portableSource) {
     [System.Environment]::SetEnvironmentVariable("Path", $env:Path, [System.EnvironmentVariableTarget]::Machine)
 }
 
-foreach ($app in $additionalSoftware) {
+# Auto-execute captured installer .exe and .msi files downloaded from the web
+$installersFolder = Join-Path $generationDir "installed-tools\installers"
+if (Test-Path $installersFolder) {
+    Get-ChildItem -Path $installersFolder -Include "*.exe", "*.msi" -Recurse | ForEach-Object {
+        Invoke-SilentInstaller -FilePath $_.FullName
+    }
+}
+
+# 5. Install Software via Winget & Choco (with Skip-If-Installed Check)
+Write-Host "[5/7] Restoring package-managed software..." -ForegroundColor Yellow
+$softwareState = Get-Content (Join-Path $generationDir "software-state.json") -Raw | ConvertFrom-Json
+$baselinePath = "D:\RDPState\baseline.json"
+$baseline = $null
+if (Test-Path $baselinePath) { $baseline = Get-Content $baselinePath -Raw | ConvertFrom-Json }
+
+$installedWinget = @()
+try { $installedWinget = winget list --accept-source-agreements 2>$null | Out-String } catch {}
+
+foreach ($app in $softwareState) {
     if ($app.wingetId) {
-        Write-Host "Installing $($app.name) [$($app.wingetId)]" -ForegroundColor Gray
+        if ($installedWinget -like "*$($app.wingetId)*") {
+            Write-Host "Skipping $($app.name) - Already installed." -ForegroundColor Gray
+            continue
+        }
+        Write-Host "Installing $($app.name) [$($app.wingetId)] via Winget..." -ForegroundColor Gray
         winget install --id $app.wingetId --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity --silent
         continue
     }
