@@ -30,33 +30,6 @@ function Copy-Tree {
     if ($LASTEXITCODE -ge 8) { throw "Robocopy failed: $Source" }
 }
 
-function Invoke-SilentInstaller {
-    param([string]$FilePath)
-    $ext = [System.IO.Path]::GetExtension($FilePath).ToLower()
-    Write-Host "Executing custom installer: $(Split-Path $FilePath -Leaf)..." -ForegroundColor Yellow
-
-    if ($ext -eq ".msi") {
-        Start-Process "msiexec.exe" -ArgumentList "/i `"$FilePath`" /qn /norestart" -Wait -NoNewWindow
-    } elseif ($ext -eq ".exe") {
-        # Tries standard silent switches: InnoSetup (/VERYSILENT), NSIS (/S), InstallShield (/s)
-        $switches = @("/VERYSILENT /NORESTART /ALLUSERS", "/S", "/s", "/silent", "/q")
-        $installed = $false
-
-        foreach ($sw in $switches) {
-            $p = Start-Process -FilePath $FilePath -ArgumentList $sw -PassThru -NoNewWindow
-            $p | Wait-Process -Timeout 120 -ErrorAction SilentlyContinue
-            if ($p.HasExited -and $p.ExitCode -eq 0) {
-                $installed = $true
-                break
-            }
-        }
-        if (!$installed) {
-            # Fallback execution if silent flags exit with errors
-            Start-Process -FilePath $FilePath -ArgumentList "/S" -Wait -NoNewWindow
-        }
-    }
-}
-
 Write-Host "==============================================" -ForegroundColor Cyan
 Write-Host "              RDP STATE RESTORE" -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
@@ -81,7 +54,7 @@ $generation = "{0:D6}" -f [int]$current.generation
 $generationDir = Join-Path $LocalRoot $generation
 New-Directory $generationDir
 
-# 2. Fast Archive Download & Extraction
+# 2. Download Checkpoint Archive
 Write-Host "[2/7] Downloading checkpoint archive $generation..." -ForegroundColor Yellow
 $archiveZip = Join-Path $LocalRoot "$generation.zip"
 & rclone copyto "$RemoteRoot/archives/$generation.zip" $archiveZip --quiet
@@ -102,39 +75,26 @@ foreach ($file in $requiredFiles) {
     }
 }
 
-# 4. Restore Portable Apps (D:\Software) & Silent Custom Installers
-Write-Host "[4/7] Restoring portable apps and running installer packages..." -ForegroundColor Yellow
-
+# 4. Restore Portable Apps (D:\Software)
+Write-Host "[4/7] Restoring portable applications..." -ForegroundColor Yellow
 $portableSource = Join-Path $generationDir "installed-tools\Software"
 if (Test-Path $portableSource) {
-    Write-Host "Restoring portable applications to D:\Software..." -ForegroundColor Gray
     if (!(Test-Path "D:\Software")) { New-Item -ItemType Directory -Path "D:\Software" -Force | Out-Null }
     Copy-Tree $portableSource "D:\Software"
     $env:Path += ";D:\Software"
     [System.Environment]::SetEnvironmentVariable("Path", $env:Path, [System.EnvironmentVariableTarget]::Machine)
 }
 
-# Auto-execute captured installer .exe and .msi files downloaded from the web
-$installersFolder = Join-Path $generationDir "installed-tools\installers"
-if (Test-Path $installersFolder) {
-    Get-ChildItem -Path $installersFolder -Include "*.exe", "*.msi" -Recurse | ForEach-Object {
-        Invoke-SilentInstaller -FilePath $_.FullName
-    }
-}
-
-# 5. Install Software via Winget & Choco (with Skip-If-Installed Check)
+# 5. Install Software via Winget & Choco
 Write-Host "[5/7] Restoring package-managed software..." -ForegroundColor Yellow
 $softwareState = Get-Content (Join-Path $generationDir "software-state.json") -Raw | ConvertFrom-Json
-$baselinePath = "D:\RDPState\baseline.json"
-$baseline = $null
-if (Test-Path $baselinePath) { $baseline = Get-Content $baselinePath -Raw | ConvertFrom-Json }
 
-$installedWinget = @()
+$installedWinget = ""
 try { $installedWinget = winget list --accept-source-agreements 2>$null | Out-String } catch {}
 
 foreach ($app in $softwareState) {
     if ($app.wingetId) {
-        if ($installedWinget -like "*$($app.wingetId)*") {
+        if ($installedWinget -and $installedWinget.Contains($app.wingetId)) {
             Write-Host "Skipping $($app.name) - Already installed." -ForegroundColor Gray
             continue
         }
@@ -149,13 +109,16 @@ foreach ($app in $softwareState) {
     }
 }
 
-# 6. Restore User Configuration as RDP User
-Write-Host "[6/7] Restoring RDP user configuration..." -ForegroundColor Yellow
+# 6. Restore User Configuration & Auto-Run Custom Installers as RDP User
+Write-Host "[6/7] Restoring RDP user configuration & running installers..." -ForegroundColor Yellow
 $userScript = Join-Path $scriptDir "restore-user.ps1"
 $packagePath = Join-Path $generationDir "rewin"
+$installersFolder = Join-Path $generationDir "installed-tools\installers"
 
 $taskName = "RDP-State-Restore-$generation"
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$userScript`" -PackagePath `"$packagePath`" -ReWinRoot `"$ReWinRoot`""
+$taskArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$userScript`" -PackagePath `"$packagePath`" -ReWinRoot `"$ReWinRoot`" -InstallersPath `"$installersFolder`""
+
+$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $taskArgs
 $principal = New-ScheduledTaskPrincipal -UserId $UserName -LogonType Password -RunLevel Highest
 
 $task = New-ScheduledTask -Action $action -Principal $principal
