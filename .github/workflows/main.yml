@@ -1,4 +1,4 @@
-name: RDP
+name: RDP Persistence Workflow
 
 on:
   workflow_dispatch:
@@ -8,408 +8,184 @@ on:
 
 jobs:
   secure-rdp:
-
     runs-on: windows-latest
-
     timeout-minutes: 3600
 
-    steps:
+    steps:        
+      #################################################################        
+      # 1️⃣ Core RDP & System Configuration
+      #################################################################        
+      - name: Configure Core RDP Settings        
+        run: |        
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force        
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force        
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force        
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null       
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389        
+          Restart-Service -Name TermService -Force        
 
-      # ============================================================
-      # 1. Configure Core RDP Settings
-      # ============================================================
+      #################################################################        
+      # 2️⃣ Create RDP User
+      #################################################################        
+      - name: Create RDP User
+        run: |        
+          Add-Type -AssemblyName System.Security        
+          $charSet = @{        
+            Upper   = [char[]]"ABCDEFGHIJKLMNOPQRSTUVWXYZ"        
+            Lower   = [char[]]"abcdefghijklmnopqrstuvwxyz"        
+            Number  = [char[]]"0123456789"        
+            Special = [char[]]"!@#$%^&*"        
+          }        
+          $rawPassword = @()        
+          $rawPassword += $charSet.Upper | Get-Random -Count 4        
+          $rawPassword += $charSet.Lower | Get-Random -Count 4        
+          $rawPassword += $charSet.Number | Get-Random -Count 4        
+          $rawPassword += $charSet.Special | Get-Random -Count 4        
+          $password = -join ($rawPassword | Sort-Object { Get-Random })        
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force        
+          $user = Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue        
+          if (-not $user) {        
+            New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires        
+            Add-LocalGroupMember -Group "Administrators" -Member "RDP"        
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"        
+          }        
+          echo "RDP_CREDS=$password" >> $env:GITHUB_ENV
 
-      - name: Configure Core RDP Settings
-        shell: powershell
+      #################################################################        
+      # 3️⃣ Environment Tooling & ReWin Integration
+      #################################################################        
+      - name: Install Tooling & Clone ReWin
         run: |
+          # Install RClone
+          Invoke-WebRequest https://downloads.rclone.org/rclone-current-windows-amd64.zip -OutFile rclone.zip        
+          Expand-Archive rclone.zip -DestinationPath $env:TEMP        
+          Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe" -Force
 
-          Set-ItemProperty `
-            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-            -Name "fDenyTSConnections" `
-            -Value 0 `
-            -Force
+          # Install Tailscale
+          $url="https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"        
+          $file="$env:TEMP\tailscale.msi"        
+          Invoke-WebRequest $url -OutFile $file        
+          Start-Process msiexec.exe -ArgumentList "/i `"$file`" /quiet /norestart" -Wait        
+          Remove-Item $file -Force
 
-          Set-ItemProperty `
-            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name "UserAuthentication" `
-            -Value 0 `
-            -Force
+          # Baseline RDP Software
+          winget install --id Python.Python.3.11 --exact --silent --accept-source-agreements --accept-package-agreements        
+          winget install --id Nvidia.CUDA --silent --accept-source-agreements --accept-package-agreements        
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")        
+          python -m pip install --upgrade pip        
+          python -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 
-          Set-ItemProperty `
-            -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-            -Name "SecurityLayer" `
-            -Value 0 `
-            -Force
+          # Clone ReWin framework into target tools path
+          New-Item -ItemType Directory -Path "D:\RDPState\tools" -Force | Out-Null
+          git clone https://github.com/Jany-M/ReWin.git "D:\RDPState\tools\ReWin"
 
-          netsh advfirewall firewall delete rule `
-            name="RDP-Tailscale"
-
-          netsh advfirewall firewall add rule `
-            name="RDP-Tailscale" `
-            dir=in `
-            action=allow `
-            protocol=TCP `
-            localport=3389
-
-          Restart-Service `
-            -Name TermService `
-            -Force
-
-
-      # ============================================================
-      # 2. Checkout persistence code
-      # ============================================================
-
-      - name: Checkout persistence system
+      #################################################################        
+      # 4️⃣ Capture Baseline & Run State Restore
+      #################################################################        
+      - name: Checkout Repository Scripts
         uses: actions/checkout@v4
 
-
-      # ============================================================
-      # 3. Create RDP User
-      # ============================================================
-
-      - name: Create RDP User
-        shell: powershell
-        run: |
-
-          Add-Type -AssemblyName System.Security
-
-          $charSet = @{
-            Upper   = [char[]]"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-            Lower   = [char[]]"abcdefghijklmnopqrstuvwxyz"
-            Number  = [char[]]"0123456789"
-            Special = [char[]]"!@#$%^&*"
-          }
-
-          $rawPassword = @()
-
-          $rawPassword += `
-            $charSet.Upper |
-            Get-Random -Count 4
-
-          $rawPassword += `
-            $charSet.Lower |
-            Get-Random -Count 4
-
-          $rawPassword += `
-            $charSet.Number |
-            Get-Random -Count 4
-
-          $rawPassword += `
-            $charSet.Special |
-            Get-Random -Count 4
-
-          $password =
-            -join (
-              $rawPassword |
-              Sort-Object {
-                Get-Random
-              }
-            )
-
-          $securePass =
-            ConvertTo-SecureString `
-              $password `
-              -AsPlainText `
-              -Force
-
-          $user =
-            Get-LocalUser `
-              -Name "RDP" `
-              -ErrorAction SilentlyContinue
-
-          if (!$user) {
-
-            New-LocalUser `
-              -Name "RDP" `
-              -Password $securePass `
-              -AccountNeverExpires
-
-            Add-LocalGroupMember `
-              -Group "Administrators" `
-              -Member "RDP"
-
-            Add-LocalGroupMember `
-              -Group "Remote Desktop Users" `
-              -Member "RDP"
-          }
-
-          "RDP_CREDS=$password" |
-            Out-File `
-              -FilePath $env:GITHUB_ENV `
-              -Append
-
-
-      # ============================================================
-      # 4. Install Tailscale
-      # ============================================================
-
-      - name: Install Tailscale
-        shell: powershell
-        run: |
-
-          $url =
-            "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-
-          $file =
-            "$env:TEMP\tailscale.msi"
-
-          Invoke-WebRequest `
-            $url `
-            -OutFile $file
-
-          Start-Process `
-            msiexec.exe `
-            -ArgumentList "/i `"$file`" /quiet /norestart" `
-            -Wait
-
-          Remove-Item `
-            $file `
-            -Force
-
-
-      # ============================================================
-      # 5. Connect Tailscale
-      # ============================================================
-
-      - name: Establish Tailscale Connection
-        shell: powershell
-        run: |
-
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" `
-            up `
-            --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
-            --hostname=rdp-node
-
-          $ip = $null
-
-          for ($i = 0; $i -lt 10; $i++) {
-
-            $ip =
-              & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-
-            if ($ip) {
-              break
-            }
-
-            Start-Sleep -Seconds 5
-          }
-
-          if (!$ip) {
-            exit 1
-          }
-
-          "TAILSCALE_IP=$ip" |
-            Out-File `
-              -FilePath $env:GITHUB_ENV `
-              -Append
-
-
-      # ============================================================
-      # 6. Install rclone
-      # ============================================================
-
-      - name: Install rclone
-        shell: powershell
-        run: |
-
-          Invoke-WebRequest `
-            "https://downloads.rclone.org/rclone-current-windows-amd64.zip" `
-            -OutFile "rclone.zip"
-
-          Expand-Archive `
-            "rclone.zip" `
-            -DestinationPath $env:TEMP `
-            -Force
-
-          Copy-Item `
-            "$env:TEMP\rclone*\rclone.exe" `
-            "C:\Windows\System32\rclone.exe" `
-            -Force
-
-
-      # ============================================================
-      # 7. Send RDP credentials
-      # ============================================================
-
-      - name: Send Notification to Telegram
-        shell: powershell
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - name: Capture Baseline & Restore Environment State
+        env:        
+          RCLONE_CONFIG_MYDRIVE_TYPE: "drive"        
+          RCLONE_CONFIG_MYDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}        
           RDP_PASS: ${{ env.RDP_CREDS }}
-          RDP_IP: ${{ env.TAILSCALE_IP }}
-
         run: |
+          # 1. Force initial user profile creation for RDP user
+          $secStr = ConvertTo-SecureString $env:RDP_PASS -AsPlainText -Force    
+          $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)    
+          Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job
 
-          $message = @"
-          🚀 <b>Universal RDP Ready</b>
+          # 2. Capture baseline of fresh machine software
+          powershell -ExecutionPolicy Bypass -File ".\scripts\capture-baseline.ps1" -OutputPath "D:\RDPState\baseline.json"
 
-          🌐 <b>IP:</b> <code>$env:RDP_IP</code>
-          👤 <b>User:</b> <code>RDP</code>
-          🔑 <b>Pass:</b> <code>$env:RDP_PASS</code>
-
-          <i>Restoring your previous environment...</i>
-          "@
-
-          $url =
-            "https://api.telegram.org/bot$env:TELEGRAM_TOKEN/sendMessage"
-
-          $bodyJson = @{
-            chat_id = $env:TELEGRAM_CHAT_ID
-            text = $message
-            parse_mode = "HTML"
-          } |
-          ConvertTo-Json -Compress
-
-          $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyJson)
-
-          Invoke-RestMethod `
-            -Uri $url `
-            -Method Post `
-            -ContentType "application/json; charset=utf-8" `
-            -Body $bodyBytes
-
-
-      # ============================================================
-      # 8. Capture clean runner baseline
-      # ============================================================
-
-      - name: Capture fresh Windows baseline
-        shell: powershell
-        run: |
-
-          powershell `
-            -NoProfile `
-            -ExecutionPolicy Bypass `
-            -File "$env:GITHUB_WORKSPACE\persistence\capture-baseline.ps1"
-
-
-      # ============================================================
-      # 9. Restore previous RDP state
-      # ============================================================
-
-      - name: Restore previous RDP environment
-        shell: powershell
-        env:
-          RCLONE_CONFIG_MYDRIVE_TYPE: "drive"
-          RCLONE_CONFIG_MYDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
-
-        run: |
-
-          powershell `
-            -NoProfile `
-            -ExecutionPolicy Bypass `
-            -File "$env:GITHUB_WORKSPACE\persistence\restore.ps1" `
+          # 3. Restore previous state if available (skips cleanly if no checkpoint exists)
+          powershell -ExecutionPolicy Bypass -File ".\scripts\restore-state.ps1" `
             -RemoteRoot "mydrive:rdp-backups" `
+            -LocalRoot "D:\RDPState\restore" `
+            -ReWinRoot "D:\RDPState\tools\ReWin" `
             -UserName "RDP" `
-            -UserPassword "$env:RDP_CREDS"
+            -UserPassword "$env:RDP_PASS"
 
-
-      # ============================================================
-      # 10. RDP session is now ready
-      # ============================================================
-
-      - name: Notify Environment Ready
-        shell: powershell
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-        run: |
-
+      #################################################################        
+      # 5️⃣ Tailscale Connection & Telegram Dispatch
+      #################################################################        
+      - name: Establish Tailscale & Notify Telegram
+        env:        
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}        
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}        
+          RDP_PASS: ${{ env.RDP_CREDS }}        
+        run: |        
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=rdp-node        
+          $ip=$null        
+          for ($i=0;$i -lt 10;$i++){        
+            $ip=& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4        
+            if($ip){break}        
+            Start-Sleep 5        
+          }        
+          if(-not $ip){exit 1}        
+          
           $message = @"
-          ✅ <b>RDP Environment Restored</b>
+          🚀 <b>RDP Ready & Environment Synced</b>
 
-          Your previous files, application configurations,
-          presets and mapped software have been restored.
-
-          🖥️ <b>IP:</b> <code>${{ env.TAILSCALE_IP }}</code>
+          🌐 <b>IP:</b> <code>$ip</code>
           👤 <b>User:</b> <code>RDP</code>
+          🔑 <b>Pass:</b> <code>$($env:RDP_PASS)</code>
+
+          <i>System state, software diffs, and configs fully restored!</i>
           "@
+          $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"          
+          $body = @{ chat_id = $env:TELEGRAM_CHAT_ID; text = $message; parse_mode = "HTML" } | ConvertTo-Json          
+          Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body
 
-          $url =
-            "https://api.telegram.org/bot$env:TELEGRAM_TOKEN/sendMessage"
+      #################################################################        
+      # 6️⃣ Monitor Session & Trigger Automated ReWin Backup
+      #################################################################        
+      - name: Idle Loop & Checkpoint Backup
+        env:        
+          RCLONE_CONFIG_MYDRIVE_TYPE: "drive"        
+          RCLONE_CONFIG_MYDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}        
+          GH_PAT: ${{ secrets.GH_PAT }}        
+          RDP_PASS: ${{ env.RDP_CREDS }}
+        run: |        
+          $start = Get-Date    
+          $lastLog = -1    
+          while ($true) {    
+            $elapsed = [math]::Floor((New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes)    
+            if ($elapsed -gt $lastLog) {    
+                Write-Host "RDP Active | Session Time: $elapsed min / 330 min cutoff"    
+                $lastLog = $elapsed    
+            }    
 
-          $bodyJson = @{
-            chat_id = $env:TELEGRAM_CHAT_ID
-            text = $message
-            parse_mode = "HTML"
-          } |
-          ConvertTo-Json -Compress
+            # Run state backup at 5.5 hours (330 mins)
+            if ($elapsed -ge 330) {    
+              Write-Host "⏳ Cutoff reached. Executing ReWin Checkpoint Backup..." -ForegroundColor Yellow
+              
+              powershell -ExecutionPolicy Bypass -File ".\scripts\backup-state.ps1" `
+                -ReWinRoot "D:\RDPState\tools\ReWin" `
+                -StageRoot "D:\RDPState\stage" `
+                -LocalCheckpointRoot "D:\RDPState\checkpoints" `
+                -RemoteRoot "mydrive:rdp-backups" `
+                -UserName "RDP" `
+                -UserPassword "$env:RDP_PASS"
 
-          $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyJson)
+              # Re-trigger GitHub Action workflow chain
+              Write-Host "🔄 Triggering new workflow dispatch..." -ForegroundColor Green
+              $uri = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/main.yml/dispatches"    
+              Invoke-RestMethod -Uri $uri -Method POST -Headers @{Authorization="token $env:GH_PAT"; Accept="application/vnd.github+json"} -Body '{"ref":"main"}'    
+              break    
+            }    
+            Start-Sleep 60    
+          }
 
-          Invoke-RestMethod `
-            -Uri $url `
-            -Method Post `
-            -ContentType "application/json; charset=utf-8" `
-            -Body $bodyBytes
-
-
-      # ============================================================
-      # 11. CHECKPOINT
-      #
-      # This is deliberately separate from restoration.
-      # The next iteration will turn this into the timed transition
-      # controller.
-      # ============================================================
-
-      - name: Create RDP checkpoint
-        shell: powershell
-        env:
-          RCLONE_CONFIG_MYDRIVE_TYPE: "drive"
-          RCLONE_CONFIG_MYDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
-
-        run: |
-
-          powershell `
-            -NoProfile `
-            -ExecutionPolicy Bypass `
-            -File "$env:GITHUB_WORKSPACE\persistence\checkpoint.ps1" `
-            -RemoteRoot "mydrive:rdp-backups" `
-            -UserName "RDP" `
-            -UserPassword "$env:RDP_CREDS"
-
-
-      # ============================================================
-      # 12. Final status
-      # ============================================================
-
-      - name: Send Final Status
-        if: always()
-        shell: powershell
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-        run: |
-
-          $status = "${{ job.status }}"
-
-          $message = @"
-          🏁 <b>RDP Session Finished</b>
-
-          Status: <b>$status</b>
-
-          Persistent checkpoint has been created
-          when the checkpoint stage completed successfully.
-          "@
-
-          $url =
-            "https://api.telegram.org/bot$env:TELEGRAM_TOKEN/sendMessage"
-
-          $bodyJson = @{
-            chat_id = $env:TELEGRAM_CHAT_ID
-            text = $message
-            parse_mode = "HTML"
-          } |
-          ConvertTo-Json -Compress
-
-          $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($bodyJson)
-
-          Invoke-RestMethod `
-            -Uri $url `
-            -Method Post `
-            -ContentType "application/json; charset=utf-8" `
-            -Body $bodyBytes
+      - name: Notify Workflow Transition
+        if: always()        
+        env:        
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}        
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}        
+        run: |        
+          $status = "${{ job.status }}"    
+          $message = "🏁 <b>RDP Session Ended</b>`nStatus: <b>$status</b>`nNext instance spinning up."    
+          $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"    
+          $body = @{ chat_id = $env:TELEGRAM_CHAT_ID; text = $message; parse_mode = "HTML" } | ConvertTo-Json    
+          Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body
