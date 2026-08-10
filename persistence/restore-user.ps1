@@ -43,4 +43,4 @@ $options = @{
 
 Write-Host "Restoring ReWin configuration..." -ForegroundColor Yellow
 Start-FullRestore -PackagePath $PackagePath -Options $options
-Write-Host "User configuration restoration complete." -ForegroundColor Green
+Write-Host "[OK] User configuration restoration complete." -ForegroundColor Green
