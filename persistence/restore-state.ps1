@@ -2,7 +2,9 @@
 param (
     [string]$RemoteRoot = "mydrive:rdp-backups",
     [string]$LocalRoot = "D:\RDPState\restore",
-    [string]$UserName = "RDP"
+    [string]$ReWinRoot = "D:\RDPState\tools\ReWin",
+    [string]$UserName = "RDP",
+    [string]$UserPassword = ""
 )
 
 $ErrorActionPreference = "SilentlyContinue"
@@ -57,4 +59,5 @@ if (Test-Path $zipPath) {
 }
 
 $sw.Stop()
-Write-Host "🎉 Restore completed in $($sw.Elapsed.TotalSeconds.ToString('N2')) seconds!" -ForegroundColor Green
+$elapsed = $sw.Elapsed.TotalSeconds.ToString("N2")
+Write-Host "🎉 Restore completed in $elapsed seconds!" -ForegroundColor Green
