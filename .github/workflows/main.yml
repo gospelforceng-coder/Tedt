@@ -52,7 +52,7 @@ jobs:
           echo "RDP_CREDS=$password" >> $env:GITHUB_ENV
 
       #################################################################        
-      # 3️⃣ Environment Tooling & ReWin Integration (Lightweight)
+      # 3️⃣ Environment Tooling & ReWin Integration
       #################################################################        
       - name: Install Essential Tooling & Clone ReWin
         run: |
@@ -74,7 +74,7 @@ jobs:
 
           # Clone ReWin framework into target tools path
           New-Item -ItemType Directory -Path "D:\RDPState\tools" -Force | Out-Null
-          git clone https://github.com/Jany-M/ReWin.git "D:\RDPState\tools\ReWin[span_0](start_span)"[span_0](end_span)
+          git clone https://github.com/Jany-M/ReWin.git "D:\RDPState\tools\ReWin"
 
       #################################################################        
       # 4️⃣ Capture Baseline & Run State Restore
