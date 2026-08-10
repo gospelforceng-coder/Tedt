@@ -28,14 +28,7 @@ jobs:
       # 2️⃣ Create RDP User
       #################################################################        
       - name: Create RDP User
-        run: |        
-          Add-Type -AssemblyName System.Security        
-          $charSet = @{        
-            Upper   = [char[]]"ABCDEFGHIJKLMNOPQRSTUVWXYZ"        
-            Lower   = [char[]]"abcdefghijklmnopqrstuvwxyz"        
-            Number  = [char[]]"0123456789"        
-            Special = [char[]]"!@#$%^&*"        
-          }        
+        run: | Add-Type -AssemblyName System.Security $charSet=@{ Upper=[char[]]"ABCDEFGHIJKLMNOPQRSTUVWXYZ"; Lower=[char[]]"abcdefghijklmnopqrstuvwxyz"; Number=[char[]]"0123456789"; Special=[char[]]"!@#$%^&*" }
           $rawPassword = @()        
           $rawPassword += $charSet.Upper | Get-Random -Count 4        
           $rawPassword += $charSet.Lower | Get-Random -Count 4        
@@ -52,8 +45,11 @@ jobs:
           echo "RDP_CREDS=$password" >> $env:GITHUB_ENV
 
       #################################################################        
-      # 3️⃣ Environment Tooling & ReWin Integration
+      # 3️⃣ Checkout Repository & Install Tooling
       #################################################################        
+      - name: Checkout Repository Scripts
+        uses: actions/checkout@v4
+
       - name: Install Essential Tooling & Clone ReWin
         run: |
           # Install RClone
@@ -79,9 +75,6 @@ jobs:
       #################################################################        
       # 4️⃣ Capture Baseline & Run State Restore
       #################################################################        
-      - name: Checkout Repository Scripts
-        uses: actions/checkout@v4
-
       - name: Capture Baseline & Restore Environment State
         env:        
           RCLONE_CONFIG_MYDRIVE_TYPE: "drive"        
@@ -93,11 +86,13 @@ jobs:
           $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)    
           Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job
 
-          # 2. Capture baseline of fresh machine software
-          powershell -ExecutionPolicy Bypass -File ".\scripts\capture-baseline.ps1" -OutputPath "D:\RDPState\baseline.json"
+          # 2. Capture baseline using absolute workspace script path
+          $captureScript = Join-Path $env:GITHUB_WORKSPACE "scripts\capture-baseline.ps1"
+          powershell -ExecutionPolicy Bypass -File "$captureScript" -OutputPath "D:\RDPState\baseline.json"
 
-          # 3. Restore previous state if available (skips cleanly if no checkpoint exists)
-          powershell -ExecutionPolicy Bypass -File ".\scripts\restore-state.ps1" `
+          # 3. Restore state using absolute workspace script path
+          $restoreScript = Join-Path $env:GITHUB_WORKSPACE "scripts\restore-state.ps1"
+          powershell -ExecutionPolicy Bypass -File "$restoreScript" `
             -RemoteRoot "mydrive:rdp-backups" `
             -LocalRoot "D:\RDPState\restore" `
             -ReWinRoot "D:\RDPState\tools\ReWin" `
@@ -158,7 +153,8 @@ jobs:
             if ($elapsed -ge 330) {    
               Write-Host "⏳ Cutoff reached. Executing ReWin Checkpoint Backup..." -ForegroundColor Yellow
               
-              powershell -ExecutionPolicy Bypass -File ".\scripts\backup-state.ps1" `
+              $backupScript = Join-Path $env:GITHUB_WORKSPACE "scripts\backup-state.ps1"
+              powershell -ExecutionPolicy Bypass -File "$backupScript" `
                 -ReWinRoot "D:\RDPState\tools\ReWin" `
                 -StageRoot "D:\RDPState\stage" `
                 -LocalCheckpointRoot "D:\RDPState\checkpoints" `
