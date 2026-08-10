@@ -46,4 +46,5 @@ if (-not (Test-Path $parentDir)) { New-Item -ItemType Directory -Path $parentDir
 $baselineIndex | ConvertTo-Json -Compress | Set-Content -Path $OutputPath -Encoding UTF8
 
 $sw.Stop()
-Write-Host "✅ Baseline captured in $($sw.Elapsed.TotalSeconds.ToString('N2')) seconds." -ForegroundColor Green
+$elapsed = $sw.Elapsed.TotalSeconds.ToString("N2")
+Write-Host "✅ Baseline captured in $elapsed seconds." -ForegroundColor Green
