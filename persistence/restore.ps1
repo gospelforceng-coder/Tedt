@@ -1,28 +1,18 @@
 [CmdletBinding()]
 param(
     [string]$RemoteRoot = "mydrive:rdp-backups",
-
     [string]$LocalRoot = "D:\RDPState\restore",
-
     [string]$ReWinRoot = "",
-
     [string]$UserName = "RDP",
-
-    [Parameter(Mandatory)]
-    [string]$UserPassword
+    [Parameter(Mandatory)][string]$UserPassword
 )
 
 $ErrorActionPreference = "Stop"
 
 if (!$ReWinRoot) {
-    $ReWinRoot = Join-Path `
-        $PSScriptRoot `
-        "..\tools\ReWin"
+    $ReWinRoot = Join-Path $PSScriptRoot "..\tools\ReWin"
 }
-
-$ReWinRoot = (
-    Resolve-Path $ReWinRoot
-).Path
+$ReWinRoot = (Resolve-Path $ReWinRoot).Path
 
 if (!(Get-Command rclone -ErrorAction SilentlyContinue)) {
     throw "rclone is not installed."
@@ -30,374 +20,134 @@ if (!(Get-Command rclone -ErrorAction SilentlyContinue)) {
 
 function New-Directory {
     param([string]$Path)
-
-    if (!(Test-Path $Path)) {
-        New-Item `
-            -ItemType Directory `
-            -Path $Path `
-            -Force |
-            Out-Null
-    }
+    if (!(Test-Path $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
 }
 
 function Copy-Tree {
-    param(
-        [string]$Source,
-        [string]$Destination
-    )
-
-    if (!(Test-Path $Source)) {
-        return
-    }
-
+    param([string]$Source, [string]$Destination)
+    if (!(Test-Path $Source)) { return }
     New-Directory $Destination
-
-    robocopy `
-        $Source `
-        $Destination `
-        /E `
-        /XJ `
-        /R:1 `
-        /W:1 `
-        /MT:16 `
-        /NP `
-        /NFL `
-        /NDL | Out-Null
-
-    if ($LASTEXITCODE -ge 8) {
-        throw "Robocopy failed: $Source"
-    }
+    robocopy $Source $Destination /E /XJ /R:1 /W:1 /MT:16 /NP /NFL /NDL | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw "Robocopy failed: $Source" }
 }
 
-Write-Host ""
 Write-Host "==============================================" -ForegroundColor Cyan
 Write-Host "              RDP STATE RESTORE" -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
 
-if (Test-Path $LocalRoot) {
-    Remove-Item `
-        $LocalRoot `
-        -Recurse `
-        -Force
-}
-
+if (Test-Path $LocalRoot) { Remove-Item $LocalRoot -Recurse -Force }
 New-Directory $LocalRoot
 
-# ------------------------------------------------
-# 1. Read current checkpoint
-# ------------------------------------------------
-
+# 1. Read Current Checkpoint
 Write-Host "[1/7] Checking checkpoint..." -ForegroundColor Yellow
-
-$currentPath = Join-Path `
-    $LocalRoot `
-    "current.json"
-
-& rclone copyto `
-    "$RemoteRoot/current.json" `
-    $currentPath `
-    --quiet
+$currentPath = Join-Path $LocalRoot "current.json"
+& rclone copyto "$RemoteRoot/current.json" $currentPath --quiet
 
 if ($LASTEXITCODE -ne 0 -or !(Test-Path $currentPath)) {
-    Write-Host "No persistent checkpoint exists." -ForegroundColor Cyan
+    Write-Host "No persistent checkpoint exists. Fresh start." -ForegroundColor Cyan
     exit 0
 }
 
-$current = Get-Content `
-    $currentPath `
-    -Raw |
-    ConvertFrom-Json
-
-if ($current.status -ne "READY") {
-    throw "Checkpoint is not READY."
-}
+$current = Get-Content $currentPath -Raw | ConvertFrom-Json
+if ($current.status -ne "READY") { throw "Checkpoint is not READY." }
 
 $generation = "{0:D6}" -f [int]$current.generation
-
-$generationDir = Join-Path `
-    $LocalRoot `
-    $generation
-
+$generationDir = Join-Path $LocalRoot $generation
 New-Directory $generationDir
 
-# ------------------------------------------------
-# 2. Download checkpoint
-# ------------------------------------------------
-
+# 2. Download Checkpoint
 Write-Host "[2/7] Downloading checkpoint $generation..." -ForegroundColor Yellow
+& rclone copy "$RemoteRoot/generations/$generation" $generationDir --progress
+if ($LASTEXITCODE -ne 0) { throw "Checkpoint download failed." }
 
-& rclone copy `
-    "$RemoteRoot/generations/$generation" `
-    $generationDir `
-    --progress
-
-if ($LASTEXITCODE -ne 0) {
-    throw "Checkpoint download failed."
-}
-
-$checkpointPath = Join-Path `
-    $generationDir `
-    "checkpoint.json"
-
-if (!(Test-Path $checkpointPath)) {
-    throw "checkpoint.json is missing."
-}
-
-$checkpoint = Get-Content `
-    $checkpointPath `
-    -Raw |
-    ConvertFrom-Json
-
-# ------------------------------------------------
-# 3. Validate checkpoint
-# ------------------------------------------------
-
+# 3. Validate Checkpoint
 Write-Host "[3/7] Validating checkpoint..." -ForegroundColor Yellow
-
-$requiredFiles = @(
-    "checkpoint.json",
-    "software-state.json",
-    "rewin\migration_package.json",
-    "rewin\software_inventory.json",
-    "rewin\package_mappings.json",
-    "rewin\config_backup.json"
-)
-
+$requiredFiles = @("checkpoint.json", "software-state.json", "rewin\migration_package.json", "rewin\software_inventory.json", "rewin\package_mappings.json", "rewin\config_backup.json")
 foreach ($file in $requiredFiles) {
-
-    $path = Join-Path `
-        $generationDir `
-        $file
-
-    if (!(Test-Path $path)) {
+    if (!(Test-Path (Join-Path $generationDir $file))) {
         throw "Required checkpoint file missing: $file"
     }
 }
 
-# ------------------------------------------------
-# 4. Determine additional software
-# ------------------------------------------------
-
+# 4. Determine Additional Software (Structured Match)
 Write-Host "[4/7] Determining additional software..." -ForegroundColor Yellow
-
-$softwareState = @(
-    Get-Content `
-        (Join-Path $generationDir "software-state.json") `
-        -Raw |
-        ConvertFrom-Json
-)
-
+$softwareState = Get-Content (Join-Path $generationDir "software-state.json") -Raw | ConvertFrom-Json
 $baselinePath = "D:\RDPState\baseline.json"
-
-$baselineText = ""
+$baseline = $null
 
 if (Test-Path $baselinePath) {
-    $baselineText = Get-Content `
-        $baselinePath `
-        -Raw
+    $baseline = Get-Content $baselinePath -Raw | ConvertFrom-Json
 }
 
 $additionalSoftware = @(
-    $softwareState |
-    Where-Object {
-
-        $id = $_.wingetId
-        $name = $_.name
-
-        if ($id -and $baselineText -match [regex]::Escape($id)) {
-            return $false
+    $softwareState | Where-Object {
+        $app = $_
+        if ($baseline) {
+            if ($app.wingetId -and ($baseline.wingetList -match [regex]::Escape($app.wingetId))) { return $false }
+            if ($app.name -and ($baseline.wingetList -match [regex]::Escape($app.name))) { return $false }
         }
-
-        if ($name -and $baselineText -match [regex]::Escape($name)) {
-            return $false
-        }
-
         return $true
     }
 )
 
-# ------------------------------------------------
-# 5. Install additional software
-# ------------------------------------------------
-
+# 5. Install Additional Software
 Write-Host "[5/7] Restoring additional software..." -ForegroundColor Yellow
-
 foreach ($app in $additionalSoftware) {
-
     if ($app.wingetId) {
-
-        Write-Host `
-            "Installing $($app.name) [$($app.wingetId)]" `
-            -ForegroundColor Gray
-
-        winget install `
-            --id $app.wingetId `
-            --exact `
-            --source winget `
-            --accept-source-agreements `
-            --accept-package-agreements `
-            --disable-interactivity `
-            --silent
-
-        if ($LASTEXITCODE -ne 0) {
-
-            Write-Warning `
-                "Could not automatically install $($app.name)."
-        }
-
+        Write-Host "Installing $($app.name) [$($app.wingetId)]" -ForegroundColor Gray
+        winget install --id $app.wingetId --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity --silent
         continue
     }
-
-    if (
-        $app.chocolateyId -and
-        (Get-Command choco -ErrorAction SilentlyContinue)
-    ) {
-
-        Write-Host `
-            "Installing $($app.name) through Chocolatey..." `
-            -ForegroundColor Gray
-
-        choco install `
-            $app.chocolateyId `
-            -y
-
+    if ($app.chocolateyId -and (Get-Command choco -ErrorAction SilentlyContinue)) {
+        Write-Host "Installing $($app.name) via Choco..." -ForegroundColor Gray
+        choco install $app.chocolateyId -y
         continue
     }
-
-    Write-Warning `
-        "No automatic installer mapping for $($app.name)."
 }
 
-# ------------------------------------------------
-# 6. Restore user configuration as RDP user
-# ------------------------------------------------
-
+# 6. Restore User Configuration as RDP User
 Write-Host "[6/7] Restoring RDP user configuration..." -ForegroundColor Yellow
-
-$userScript = Join-Path `
-    $PSScriptRoot `
-    "restore-user.ps1"
-
-$securePassword = ConvertTo-SecureString `
-    $UserPassword `
-    -AsPlainText `
-    -Force
-
-$credential = New-Object `
-    System.Management.Automation.PSCredential(
-        $UserName,
-        $securePassword
-    )
-
-$packagePath = Join-Path `
-    $generationDir `
-    "rewin"
-
-# Create a temporary scheduled task.
+$userScript = Join-Path $PSScriptRoot "restore-user.ps1"
+$packagePath = Join-Path $generationDir "rewin"
 
 $taskName = "RDP-State-Restore-$generation"
+$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$userScript`" -PackagePath `"$packagePath`" -ReWinRoot `"$ReWinRoot`""
+$principal = New-ScheduledTaskPrincipal -UserId $UserName -LogonType Password -RunLevel Highest
 
-$action = New-ScheduledTaskAction `
-    -Execute "powershell.exe" `
-    -Argument (
-        "-NoProfile " +
-        "-ExecutionPolicy Bypass " +
-        "-File `"$userScript`" " +
-        "-PackagePath `"$packagePath`" " +
-        "-ReWinRoot `"$ReWinRoot`""
-    )
+$task = New-ScheduledTask -Action $action -Principal $principal
+Register-ScheduledTask -TaskName $taskName -InputObject $task -Force -User $UserName -Password $UserPassword | Out-Null
+Start-ScheduledTask -TaskName $taskName
 
-$principal = New-ScheduledTaskPrincipal `
-    -UserId $UserName `
-    -LogonType Password `
-    -RunLevel Highest
-
-$task = New-ScheduledTask `
-    -Action $action `
-    -Principal $principal
-
-Register-ScheduledTask `
-    -TaskName $taskName `
-    -InputObject $task `
-    -Force `
-    -User $UserName `
-    -Password $UserPassword |
-    Out-Null
-
-Start-ScheduledTask `
-    -TaskName $taskName
-
-Write-Host "Waiting for user restore..." -ForegroundColor Gray
-
-$timeout = 20 * 60
+$timeout = 1200
 $timer = [Diagnostics.Stopwatch]::StartNew()
-
 while ($timer.Elapsed.TotalSeconds -lt $timeout) {
-
-    $info = Get-ScheduledTaskInfo `
-        -TaskName $taskName
-
-    if (
-        $info.LastRunTime -gt [datetime]::MinValue -and
-        $info.State -eq "Ready"
-    ) {
-        break
-    }
-
+    $info = Get-ScheduledTaskInfo -TaskName $taskName
+    if ($info.LastRunTime -gt [datetime]::MinValue -and $info.State -eq "Ready") { break }
     Start-Sleep -Seconds 5
 }
+Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
 
-Unregister-ScheduledTask `
-    -TaskName $taskName `
-    -Confirm:$false
-
-# ------------------------------------------------
-# 7. Restore user files
-# ------------------------------------------------
-
+# 7. Restore User Data Files
 Write-Host "[7/7] Restoring user files..." -ForegroundColor Yellow
-
 $profile = "C:\Users\$UserName"
-
-$userData = Join-Path `
-    $generationDir `
-    "user-data"
-
+$userData = Join-Path $generationDir "user-data"
 $restoreMap = @{
-    Desktop = Join-Path $profile "Desktop"
-
+    Desktop   = Join-Path $profile "Desktop"
     Documents = Join-Path $profile "Documents"
-
     Downloads = Join-Path $profile "Downloads"
-
-    Pictures = Join-Path $profile "Pictures"
-
-    Videos = Join-Path $profile "Videos"
-
-    Projects = Join-Path $profile "Projects"
+    Pictures  = Join-Path $profile "Pictures"
+    Videos    = Join-Path $profile "Videos"
+    Projects  = Join-Path $profile "Projects"
 }
 
 foreach ($name in $restoreMap.Keys) {
-
-    $source = Join-Path `
-        $userData `
-        $name
-
-    $destination = $restoreMap[$name]
-
+    $source = Join-Path $userData $name
     if (Test-Path $source) {
-
-        Write-Host `
-            "Restoring $name..." `
-            -ForegroundColor Gray
-
-        Copy-Tree `
-            $source `
-            $destination
+        Write-Host "Restoring $name..." -ForegroundColor Gray
+        Copy-Tree $source $restoreMap[$name]
     }
 }
 
-Write-Host ""
 Write-Host "==============================================" -ForegroundColor Green
 Write-Host "       RDP RESTORE COMPLETED: $generation" -ForegroundColor Green
 Write-Host "==============================================" -ForegroundColor Green
