@@ -28,7 +28,14 @@ jobs:
       # 2️⃣ Create RDP User
       #################################################################        
       - name: Create RDP User
-        run: | Add-Type -AssemblyName System.Security $charSet=@{ Upper=[char[]]"ABCDEFGHIJKLMNOPQRSTUVWXYZ"; Lower=[char[]]"abcdefghijklmnopqrstuvwxyz"; Number=[char[]]"0123456789"; Special=[char[]]"!@#$%^&*" }
+        run: |
+          Add-Type -AssemblyName System.Security
+          $charSet = @{
+            Upper   = [char[]]"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            Lower   = [char[]]"abcdefghijklmnopqrstuvwxyz"
+            Number  = [char[]]"0123456789"
+            Special = [char[]]"!@#$%^&*"
+          }
           $rawPassword = @()        
           $rawPassword += $charSet.Upper | Get-Random -Count 4        
           $rawPassword += $charSet.Lower | Get-Random -Count 4        
