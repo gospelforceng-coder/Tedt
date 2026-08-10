@@ -1,50 +1,52 @@
 [CmdletBinding()]
-param (
-    [Parameter(Mandatory = $true)]
-    [string]$OutputPath
+param(
+    [string]$OutputPath = "D:\RDPState\baseline.json"
 )
 
-$ErrorActionPreference = "SilentlyContinue"
+$ErrorActionPreference = "Stop"
+$parent = Split-Path $OutputPath -Parent
+if (!(Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
 
-Write-Host "🔍 Generating high-speed baseline index..." -ForegroundColor Cyan
-$sw = [System.Diagnostics.Stopwatch]::StartNew()
+Write-Host "==============================================" -ForegroundColor Cyan
+Write-Host "      CAPTURING FRESH WINDOWS BASELINE" -ForegroundColor Cyan
+Write-Host "==============================================" -ForegroundColor Cyan
 
-$scanRoots = @(
-    "C:\Users\RDP",
-    "C:\Program Files",
-    "C:\Program Files (x86)",
-    "C:\ProgramData"
-)
-
-$excludePatterns = @(
-    '\\AppData\\Local\\Temp',
-    '\\AppData\\Local\\Microsoft\\Windows',
-    '\\AppData\\Local\\Google\\Chrome\\User Data\\.*\\Cache',
-    '\\AppData\\Local\\Packages',
-    '\\AppData\\Local\\CrashDumps'
-)
-
-$baselineIndex = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-
-foreach ($root in $scanRoots) {
-    if (Test-Path $root) {
-        $files = [System.IO.Directory]::EnumerateFiles($root, "*", [System.IO.SearchOption]::AllDirectories)
-        foreach ($file in $files) {
-            $skip = $false
-            foreach ($pattern in $excludePatterns) {
-                if ($file -match $pattern) { $skip = $true; break }
-            }
-            if (-not $skip) {
-                [void]$baselineIndex.Add($file)
-            }
-        }
-    }
+$winget = @()
+try {
+    $winget = @(
+        winget list --accept-source-agreements 2>$null |
+        ForEach-Object { $_.ToString().Trim() } |
+        Where-Object { $_ -and $_ -notmatch "^Name\s+Id\s+Version" -and $_ -notmatch "^-+$" }
+    )
+} catch {
+    Write-Warning "Could not capture winget inventory."
 }
 
-$parentDir = Split-Path $OutputPath -Parent
-if (-not (Test-Path $parentDir)) { New-Item -ItemType Directory -Path $parentDir -Force | Out-Null }
-$baselineIndex | ConvertTo-Json -Compress | Set-Content -Path $OutputPath -Encoding UTF8
+$python = @()
+if (Get-Command python -ErrorAction SilentlyContinue) {
+    try {
+        $json = python -m pip list --format=json 2>$null
+        if ($json) { $python = @($json | ConvertFrom-Json) }
+    } catch {}
+}
 
-$sw.Stop()
-$elapsed = $sw.Elapsed.TotalSeconds.ToString("N2")
-Write-Host "✅ Baseline captured in $elapsed seconds." -ForegroundColor Green
+$node = @()
+if (Get-Command npm -ErrorAction SilentlyContinue) {
+    try {
+        $json = npm list -g --depth=0 --json 2>$null
+        if ($json) { $node = ($json | ConvertFrom-Json).dependencies }
+    } catch {}
+}
+
+$baseline = [ordered]@{
+    schemaVersion  = 1
+    createdUtc     = (Get-Date).ToUniversalTime().ToString("o")
+    computer       = $env:COMPUTERNAME
+    windows        = (Get-CimInstance Win32_OperatingSystem).Caption
+    wingetList     = $winget
+    pythonPackages = $python
+    nodeGlobal     = $node
+}
+
+$baseline | ConvertTo-Json -Depth 12 | Set-Content $OutputPath -Encoding UTF8
+Write-Host "[OK] Baseline saved to: $OutputPath" -ForegroundColor Green
