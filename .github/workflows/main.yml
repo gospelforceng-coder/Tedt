@@ -157,7 +157,7 @@ jobs:
             }    
 
             # Run state backup at 5.5 hours (330 mins)
-            if ($elapsed -ge 10) {    
+            if ($elapsed -ge 330) {    
               Write-Host "⏳ Cutoff reached. Executing ReWin Checkpoint Backup..." -ForegroundColor Yellow
               
               $backupScript = Join-Path $env:GITHUB_WORKSPACE "persistence\backup-state.ps1"
