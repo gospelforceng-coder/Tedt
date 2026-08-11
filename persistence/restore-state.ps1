@@ -26,7 +26,7 @@ function Copy-Tree {
     param([string]$Source, [string]$Destination)
     if (!(Test-Path $Source)) { return }
     New-Directory $Destination
-    robocopy $Source $Destination /E /XJ /R:1 /W:1 /MT:16 /NP /NFL /NDL | Out-Null
+    robocopy $Source $Destination /E /XJ /R:1 /W:1 /MT:32 /NP /NFL /NDL | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "Robocopy failed: $Source" }
 }
 
@@ -54,17 +54,9 @@ $generation = "{0:D6}" -f [int]$current.generation
 $generationDir = Join-Path $LocalRoot $generation
 New-Directory $generationDir
 
-# 2. Download Checkpoint Archive
-Write-Host "[2/7] Downloading checkpoint archive $generation..." -ForegroundColor Yellow
-$archiveZip = Join-Path $LocalRoot "$generation.zip"
-& rclone copyto "$RemoteRoot/archives/$generation.zip" $archiveZip --quiet
-
-if (Test-Path $archiveZip) {
-    Expand-Archive -Path $archiveZip -DestinationPath $generationDir -Force
-    Remove-Item $archiveZip -Force
-} else {
-    & rclone copy "$RemoteRoot/generations/$generation" $generationDir --progress
-}
+# 2. Download Checkpoint (direct folder sync, parallelized - no zip step)
+Write-Host "[2/7] Downloading checkpoint $generation..." -ForegroundColor Yellow
+& rclone copy "$RemoteRoot/generations/$generation" $generationDir --transfers 16 --checkers 16 --progress
 
 # 3. Validate Checkpoint
 Write-Host "[3/7] Validating checkpoint..." -ForegroundColor Yellow
@@ -100,6 +92,9 @@ foreach ($app in $softwareState) {
         }
         Write-Host "Installing $($app.name) [$($app.wingetId)] via Winget..." -ForegroundColor Gray
         winget install --id $app.wingetId --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity --silent
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  Winget install returned exit code $LASTEXITCODE for $($app.name)" -ForegroundColor Yellow
+        }
         continue
     }
     if ($app.chocolateyId -and (Get-Command choco -ErrorAction SilentlyContinue)) {
