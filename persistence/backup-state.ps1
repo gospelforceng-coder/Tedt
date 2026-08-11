@@ -34,7 +34,7 @@ function Copy-Tree {
     param([string]$Source, [string]$Destination)
     if (!(Test-Path $Source)) { return }
     New-Directory $Destination
-    robocopy $Source $Destination /E /XJ /R:1 /W:1 /MT:16 /NP /NFL /NDL /XD "Temp" "tmp" "Cache" "Caches" "Code Cache" "GPUCache" "CrashDumps" "node_modules" ".git" | Out-Null
+    robocopy $Source $Destination /E /XJ /R:1 /W:1 /MT:32 /NP /NFL /NDL /XD "Temp" "tmp" "Cache" "Caches" "Code Cache" "GPUCache" "CrashDumps" "node_modules" ".git" | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "Robocopy failed on $Source" }
 }
 
@@ -108,7 +108,7 @@ $package = [ordered]@{
 }
 $package | ConvertTo-Json -Depth 12 | Set-Content (Join-Path $rewinOut "migration_package.json") -Encoding UTF8
 
-# 4. Copy User Files & Capture Web Downloaded Setup Installers
+# 4. Copy User Files & Capture ONLY Installers Not Covered By Winget/Choco
 Write-Host "[4/6] Backing up user files and setup installers..." -ForegroundColor Yellow
 $profile = "C:\Users\$UserName"
 $paths = @{
@@ -131,14 +131,44 @@ if (Test-Path "D:\Software") {
     Copy-Tree "D:\Software" $toolsOut
 }
 
-# Find standalone installer files in Downloads / Desktop to auto-execute on restore
+# Build a lookup of software names already covered by winget/choco - these get
+# installed via package manager on restore, so their raw installer should NOT
+# also be captured. (This was the main cause of slow backups - e.g. capturing
+# the 240MB VS Code installer when winget already handles VS Code.)
+$coveredNames = @()
+foreach ($m in $mappings) {
+    if ($m.WingetId -or $m.ChocolateyId) {
+        if ($m.SoftwareName) { $coveredNames += $m.SoftwareName.ToLower() }
+    }
+}
+
+function Test-IsCoveredByPackageManager {
+    param([string]$FileName)
+    foreach ($name in $coveredNames) {
+        $cleanName = ($name -replace '[^a-z0-9]', '')
+        $cleanFile = ($FileName.ToLower() -replace '[^a-z0-9]', '')
+        if ($cleanName.Length -ge 4 -and $cleanFile -match [regex]::Escape($cleanName)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+# Find standalone installer files in Downloads / Desktop to auto-execute on restore.
+# Only capture installers with NO winget/choco mapping - everything else installs
+# faster and more reliably through Step 5 of restore.ps1 (winget/choco).
 $searchFolders = @(Join-Path $profile "Downloads", Join-Path $profile "Desktop")
 foreach ($folder in $searchFolders) {
     if (Test-Path $folder) {
         Get-ChildItem -Path $folder -Include "*.exe", "*.msi" -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-            if ($_.Name -match "(setup|install|installer|vscode|cursor|blender|figma|android|studio|adobe)" -or $_.Length -gt 10MB) {
-                Write-Host "Captured setup installer: $($_.Name)" -ForegroundColor Gray
-                Copy-Item -Path $_.FullName -Destination $installersOut -Force
+            $looksLikeInstaller = $_.Name -match "(setup|install|installer)" -or $_.Length -gt 10MB
+            if ($looksLikeInstaller) {
+                if (Test-IsCoveredByPackageManager -FileName $_.Name) {
+                    Write-Host "Skipping $($_.Name) - already covered by winget/choco" -ForegroundColor DarkGray
+                } else {
+                    Write-Host "Captured setup installer: $($_.Name)" -ForegroundColor Gray
+                    Copy-Item -Path $_.FullName -Destination $installersOut -Force
+                }
             }
         }
     }
@@ -171,13 +201,9 @@ $manifest = [ordered]@{
 
 $manifest | ConvertTo-Json -Depth 12 | Set-Content (Join-Path $stage "checkpoint.json") -Encoding UTF8
 
-$zipDir = Join-Path $LocalCheckpointRoot "archives"
-New-Directory $zipDir
-$zip = Join-Path $zipDir "$generationName.zip"
-Compress-Archive -Path "$stage\*" -DestinationPath $zip -CompressionLevel Optimal -Force
-
-& rclone copyto $zip "$RemoteRoot/archives/$generationName.zip" --quiet
-& rclone copy $stage "$RemoteRoot/generations/$generationName" --quiet
+# Skip zipping - Compress-Archive is single-threaded and slow on large trees.
+# rclone copies the folder directly with parallel transfers instead.
+& rclone copy $stage "$RemoteRoot/generations/$generationName" --transfers 16 --checkers 16 --quiet
 
 $current = [ordered]@{
     schemaVersion  = 1
