@@ -11,44 +11,80 @@ Write-Host "==============================================" -ForegroundColor Cya
 Write-Host "        RESTORING RDP USER ENVIRONMENT" -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
 
+function Get-InstallerSwitch {
+    param([string]$FilePath)
+
+    $bytes = [System.IO.File]::ReadAllBytes($FilePath)
+    $sampleLen = [Math]::Min($bytes.Length, 2MB)
+    $sample = [System.Text.Encoding]::ASCII.GetString($bytes[0..($sampleLen - 1)])
+
+    if ($sample -match "Inno Setup")            { return "/VERYSILENT /SUPPRESSMSGBOXES /SP- /NORESTART /ALLUSERS" }
+    if ($sample -match "Nullsoft")               { return "/S" }
+    if ($sample -match "InstallShield")          { return "/s /v/qn" }
+    if ($sample -match "WiseMain|WISE INSTALLATION") { return "/s" }
+    return $null
+}
+
+function Wait-ForInstallerCompletion {
+    param([System.Diagnostics.Process]$Proc, [string]$FilePath, [int]$TimeoutSeconds = 300)
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 3
+        $parentAlive = -not $Proc.HasExited
+        $childAlive = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+            try { $_.Path -eq $FilePath -and -not $_.HasExited } catch { $false }
+        }
+        if (-not $parentAlive -and -not $childAlive) { return $true }
+    }
+    return $false
+}
+
 # 1. Execute Web-Downloaded Installers under RDP User Session
 if ($InstallersPath -and (Test-Path $InstallersPath)) {
     Write-Host "Installing detected web-downloaded packages..." -ForegroundColor Yellow
     $installers = Get-ChildItem -Path $InstallersPath -Include "*.exe", "*.msi" -Recurse -ErrorAction SilentlyContinue
+    $manualLog = "D:\RDPState\manual-install-needed.txt"
 
     foreach ($file in $installers) {
         $ext = $file.Extension.ToLower()
-        Write-Host "--> Running installer: $($file.Name)" -ForegroundColor Gray
+        Write-Host "--> Processing: $($file.Name)" -ForegroundColor Gray
 
         if ($ext -eq ".msi") {
             $proc = Start-Process "msiexec.exe" -ArgumentList "/i `"$($file.FullName)`" /qn /norestart" -PassThru -NoNewWindow
-            $proc | Wait-Process -Timeout 180 -ErrorAction SilentlyContinue
+            $done = Wait-ForInstallerCompletion -Proc $proc -FilePath $file.FullName
+            if (-not $done) {
+                Write-Host "  Timed out waiting for MSI install" -ForegroundColor Yellow
+                Add-Content -Path $manualLog -Value $file.FullName
+            } else {
+                Write-Host "  Done" -ForegroundColor Green
+            }
         }
         elseif ($ext -eq ".exe") {
-            # InnoSetup (VS Code, Cursor, etc.), NSIS, and general silent flags
-            $argsList = @(
-                "/VERYSILENT /NORESTART /MERGETASKS=`"!runcode`"", 
-                "/VERYSILENT /ALLUSERS /NORESTART",
-                "/S", 
-                "/silent", 
-                "/q"
-            )
-            
-            $installed = $false
-            foreach ($arg in $argsList) {
-                $p = Start-Process -FilePath $file.FullName -ArgumentList $arg -PassThru -NoNewWindow
-                $p | Wait-Process -Timeout 180 -ErrorAction SilentlyContinue
-                if ($p.HasExited -and $p.ExitCode -eq 0) {
-                    $installed = $true
-                    break
-                }
+            $switch = Get-InstallerSwitch -FilePath $file.FullName
+
+            if (-not $switch) {
+                Write-Host "  Unknown installer type - flagging for manual install" -ForegroundColor Yellow
+                Add-Content -Path $manualLog -Value $file.FullName
+                continue
             }
 
-            if (-not $installed) {
-                # Fallback simple start if silent switches exit early
-                Start-Process -FilePath $file.FullName -ArgumentList "/S" -Wait -NoNewWindow -ErrorAction SilentlyContinue
+            Write-Host "  Using switch: $switch" -ForegroundColor Gray
+            $proc = Start-Process -FilePath $file.FullName -ArgumentList $switch -PassThru -NoNewWindow
+            $done = Wait-ForInstallerCompletion -Proc $proc -FilePath $file.FullName
+
+            if (-not $done) {
+                Write-Host "  Timed out - may still be running or hung. Flagging." -ForegroundColor Yellow
+                Add-Content -Path $manualLog -Value $file.FullName
+            } else {
+                Write-Host "  Done" -ForegroundColor Green
             }
         }
+    }
+
+    if (Test-Path $manualLog) {
+        Write-Host ""
+        Write-Host "Some installers need manual attention - see $manualLog" -ForegroundColor Yellow
     }
 }
 
