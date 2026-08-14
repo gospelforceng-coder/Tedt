@@ -52,13 +52,16 @@ jobs:
           echo "RDP_CREDS=$password" >> $env:GITHUB_ENV
 
       #################################################################        
-      # 3️⃣ Checkout Repository & Install Tooling
+      # 3️⃣ Checkout Repository & Install Basic Network/Tooling
       #################################################################        
       - name: Checkout Repository Scripts
         uses: actions/checkout@v4
 
       - name: Install Essential Tooling & Clone ReWin
         run: |
+          # Install 7-Zip CLI
+          winget install --id 7zip.7zip --exact --silent --accept-source-agreements --accept-package-agreements
+
           # Install RClone
           Invoke-WebRequest https://downloads.rclone.org/rclone-current-windows-amd64.zip -OutFile rclone.zip        
           Expand-Archive rclone.zip -DestinationPath $env:TEMP        
@@ -71,45 +74,18 @@ jobs:
           Start-Process msiexec.exe -ArgumentList "/i `"$file`" /quiet /norestart" -Wait        
           Remove-Item $file -Force
 
-          # Install Python 3.11 for ReWin scripts
+          # Install Python 3.11 for ReWin & gdown downloads
           winget install --id Python.Python.3.11 --exact --silent --accept-source-agreements --accept-package-agreements        
           $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")        
 
-          # Clone ReWin framework into target tools path
+          # Clone ReWin framework
           New-Item -ItemType Directory -Path "D:\RDPState\tools" -Force | Out-Null
           git clone https://github.com/Jany-M/ReWin.git "D:\RDPState\tools\ReWin"
 
       #################################################################        
-      # 4️⃣ Capture Baseline & Run State Restore
+      # 4️⃣ Connect Network & Send Telegram Credentials IMMEDIATELY
       #################################################################        
-      - name: Capture Baseline & Restore Environment State
-        env:        
-          RCLONE_CONFIG_MYDRIVE_TYPE: "drive"        
-          RCLONE_CONFIG_MYDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}        
-          RDP_PASS: ${{ env.RDP_CREDS }}
-        run: |
-          # 1. Force initial user profile creation for RDP user
-          $secStr = ConvertTo-SecureString $env:RDP_PASS -AsPlainText -Force    
-          $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)    
-          Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job
-
-          # 2. Capture baseline using workspace persistence folder path
-          $captureScript = Join-Path $env:GITHUB_WORKSPACE "persistence\capture-baseline.ps1"
-          powershell -ExecutionPolicy Bypass -File "$captureScript" -OutputPath "D:\RDPState\baseline.json"
-
-          # 3. Restore state using workspace persistence folder path
-          $restoreScript = Join-Path $env:GITHUB_WORKSPACE "persistence\restore-state.ps1"
-          powershell -ExecutionPolicy Bypass -File "$restoreScript" `
-            -RemoteRoot "mydrive:rdp-backups" `
-            -LocalRoot "D:\RDPState\restore" `
-            -ReWinRoot "D:\RDPState\tools\ReWin" `
-            -UserName "RDP" `
-            -UserPassword "$env:RDP_PASS"
-
-      #################################################################        
-      # 5️⃣ Tailscale Connection & Telegram Dispatch
-      #################################################################        
-      - name: Establish Tailscale & Notify Telegram
+      - name: Establish Tailscale & Dispatch Telegram Credentials
         env:        
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}        
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}        
@@ -125,17 +101,57 @@ jobs:
           if(-not $ip){exit 1}        
           
           $message = @"
-          🚀 <b>RDP Ready & Environment Synced</b>
+          🚀 <b>RDP Credentials Ready</b>
 
           🌐 <b>IP:</b> <code>$ip</code>
           👤 <b>User:</b> <code>RDP</code>
           🔑 <b>Pass:</b> <code>$($env:RDP_PASS)</code>
 
-          <i>System state, software diffs, and configs fully restored!</i>
+          <i>System setup & restoring state in background now...</i>
           "@
           $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"          
           $body = @{ chat_id = $env:TELEGRAM_CHAT_ID; text = $message; parse_mode = "HTML" } | ConvertTo-Json          
           Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body
+
+      #################################################################        
+      # 5️⃣ Download Multi-Part Software, Capture Baseline & Restore State
+      #################################################################        
+      - name: Download Multi-Part Tools, Capture Baseline & Restore State
+        env:        
+          RCLONE_CONFIG_MYDRIVE_TYPE: "drive"        
+          RCLONE_CONFIG_MYDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}        
+          RDP_PASS: ${{ env.RDP_CREDS }}
+        run: |
+          # 1. Force initial user profile creation for RDP user
+          $secStr = ConvertTo-SecureString $env:RDP_PASS -AsPlainText -Force    
+          $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)    
+          Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job
+
+          # 2. Download and unpack multi-part Google Drive files to D:\Software
+          $driveUrls = @(
+            "https://drive.google.com/file/d/1r6vukCciIE32V1qGdLEqr5KauFaiMZte/view?usp=drivesdk",
+            "https://drive.google.com/file/d/1Np16vmK9S35a73o74O-nuAWIH-CjlKxa/view?usp=drivesdk",
+            "https://drive.google.com/file/d/1q57S-1w8yKdxtBr_5HpRgVHO3mKc-ITF/view?usp=drivesdk",
+            "https://drive.google.com/file/d/1dGEsc-2JzA8TaOG_NHUUmTqoFHcUxqzw/view?usp=drivesdk",
+            "https://drive.google.com/file/d/1yqBWQSH2RY9gz7ZCE2J16k6j77z2owhI/view?usp=drivesdk",
+            "https://drive.google.com/file/d/1OzIs5_vSfKIEnDa6ABa57gdt2MZcflu1/view?usp=drivesdk"
+          )
+
+          $cloudAppScript = Join-Path $env:GITHUB_WORKSPACE "persistence\install-cloud-apps.ps1"
+          powershell -ExecutionPolicy Bypass -File "$cloudAppScript" -Urls $driveUrls -DestRoot "D:\Software" -ArchivePassword "123"
+
+          # 3. Capture baseline
+          $captureScript = Join-Path $env:GITHUB_WORKSPACE "persistence\capture-baseline.ps1"
+          powershell -ExecutionPolicy Bypass -File "$captureScript" -OutputPath "D:\RDPState\baseline.json"
+
+          # 4. Restore state
+          $restoreScript = Join-Path $env:GITHUB_WORKSPACE "persistence\restore-state.ps1"
+          powershell -ExecutionPolicy Bypass -File "$restoreScript" `
+            -RemoteRoot "mydrive:rdp-backups" `
+            -LocalRoot "D:\RDPState\restore" `
+            -ReWinRoot "D:\RDPState\tools\ReWin" `
+            -UserName "RDP" `
+            -UserPassword "$env:RDP_PASS"
 
       #################################################################        
       # 6️⃣ Monitor Session & Trigger Automated ReWin Backup
