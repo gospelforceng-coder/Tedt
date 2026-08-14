@@ -5,7 +5,7 @@ param(
     [string]$LocalCheckpointRoot = "D:\RDPState\checkpoints",
     [string]$RemoteRoot = "mydrive:rdp-backups",
     [string]$UserName = "RDP",
-    [string]$BaselinePath = "D:\RDPState\installed-software-list.json",
+    [string]$BaselinePath = "D:\RDPState\baseline.json",
     [string]$ExclusionListPath = "D:\RDPState\excluded-from-winget.json",
     [Parameter(Mandatory)][string]$UserPassword
 )
