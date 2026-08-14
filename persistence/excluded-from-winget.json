@@ -1,0 +1,12 @@
+{
+  "excludedAppNames": [
+    "Microsoft Office",
+    "Adobe After Effects",
+    "Flow",
+    "Adobe Premiere Pro",
+    "Adobe Photoshop",
+    "Adobe Lightroom",
+    "Altium Designer",
+    "DaVinci Resolve"
+  ]
+}
