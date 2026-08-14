@@ -52,7 +52,7 @@ jobs:
           echo "RDP_CREDS=$password" >> $env:GITHUB_ENV
 
       #################################################################        
-      # 3️⃣ Checkout Repository & Install Basic Network/Tooling
+      # 3️⃣ Checkout Repository & Install Basic Tooling
       #################################################################        
       - name: Checkout Repository Scripts
         uses: actions/checkout@v4
@@ -138,15 +138,15 @@ jobs:
           )
 
           $cloudAppScript = Join-Path $env:GITHUB_WORKSPACE "persistence\install-cloud-apps.ps1"
-          powershell -ExecutionPolicy Bypass -File "$cloudAppScript" -Urls $driveUrls -DestRoot "D:\Software" -ArchivePassword "123"
+          & "$cloudAppScript" -Urls $driveUrls -DestRoot "D:\Software" -ArchivePassword "123"
 
           # 3. Capture baseline
           $captureScript = Join-Path $env:GITHUB_WORKSPACE "persistence\capture-baseline.ps1"
-          powershell -ExecutionPolicy Bypass -File "$captureScript" -OutputPath "D:\RDPState\baseline.json"
+          & "$captureScript" -OutputPath "D:\RDPState\baseline.json"
 
           # 4. Restore state
           $restoreScript = Join-Path $env:GITHUB_WORKSPACE "persistence\restore-state.ps1"
-          powershell -ExecutionPolicy Bypass -File "$restoreScript" `
+          & "$restoreScript" `
             -RemoteRoot "mydrive:rdp-backups" `
             -LocalRoot "D:\RDPState\restore" `
             -ReWinRoot "D:\RDPState\tools\ReWin" `
@@ -177,7 +177,7 @@ jobs:
               Write-Host "⏳ Cutoff reached. Executing ReWin Checkpoint Backup..." -ForegroundColor Yellow
               
               $backupScript = Join-Path $env:GITHUB_WORKSPACE "persistence\backup-state.ps1"
-              powershell -ExecutionPolicy Bypass -File "$backupScript" `
+              & "$backupScript" `
                 -ReWinRoot "D:\RDPState\tools\ReWin" `
                 -StageRoot "D:\RDPState\stage" `
                 -LocalCheckpointRoot "D:\RDPState\checkpoints" `
