@@ -16,13 +16,13 @@ function Invoke-Checked {
     }
 }
 
-# 1. Verify Drive Exists
+# 1. Verify Target Drive Exists
 $driveLetter = ($DestRoot -split ':')[0]
 if (!(Test-Path "$driveLetter`:\")) {
     throw "Drive $driveLetter`: does not exist on this machine."
 }
 
-# 2. Verify 7-Zip Path
+# 2. Verify 7-Zip Executable
 if (!(Test-Path $SevenZipPath)) {
     $7zCmd = Get-Command 7z -ErrorAction SilentlyContinue
     if ($7zCmd) { $SevenZipPath = $7zCmd.Source }
@@ -40,7 +40,7 @@ Write-Host "==============================================" -ForegroundColor Cya
 Write-Host "   DOWNLOADING MULTI-PART GOOGLE DRIVE BUNDLE" -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
 
-# 3. Download Google Drive Files into staging (Preserving remote filenames)
+# 3. Download Google Drive Files using gdown (fuzzy flag removed)
 foreach ($url in $Urls) {
     if ([string]::IsNullOrWhiteSpace($url)) { continue }
 
@@ -56,9 +56,9 @@ foreach ($url in $Urls) {
     $driveUrl = "https://drive.google.com/uc?id=$fileId"
     Write-Host "Downloading Google Drive File ID [$fileId]..." -ForegroundColor Yellow
     
-    # Passing folder path ending with backslash causes gdown to retain real remote filenames
+    # Target directory path for gdown without trailing slash issues
     Invoke-Checked "gdown download for $fileId" {
-        python -m gdown $driveUrl -O "$stage\" --fuzzy
+        python -m gdown $driveUrl -O "$stage/"
     }
 }
 
@@ -69,10 +69,10 @@ if ($downloadedFiles.Count -eq 0) {
 
 if (!(Test-Path $DestRoot)) { New-Item -ItemType Directory -Path $DestRoot -Force | Out-Null }
 
-# 4. Extract Primary Volume
+# 4. Extract Primary Volume via 7-Zip
 Write-Host "Extracting primary archive volume to $DestRoot..." -ForegroundColor Gray
 
-# Locate primary archive file (.zip, .7z, .rar, .001, .z01, or first downloaded file)
+# Find the primary split archive (.001, .zip, .7z, .rar)
 $primaryArchive = $downloadedFiles | Where-Object { 
     $_.Extension -match "\.(zip|7z|rar|exe)$" -or $_.Name -match "\.(001|part1\.rar|z01)$" 
 } | Select-Object -First 1
@@ -97,16 +97,16 @@ foreach ($arc in $innerArchives) {
     Remove-Item $arc.FullName -Force -ErrorAction SilentlyContinue
 }
 
-# 6. Verify Files Landed
+# 6. Check that extraction produced files
 $installedCount = (Get-ChildItem -Path $DestRoot -Recurse -File -ErrorAction SilentlyContinue).Count
 if ($installedCount -eq 0) {
     throw "Extraction reported success but $DestRoot is empty. Check archive password or integrity."
 }
 
-# Cleanup Stage
+# Clean staging area
 Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
 
-# 7. System PATH Registration
+# 7. Add D:\Software to System PATH
 $currentPath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
 if ($currentPath -notlike "*$DestRoot*") {
     $newPath = "$currentPath;$DestRoot"
