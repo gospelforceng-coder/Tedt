@@ -40,7 +40,7 @@ Write-Host "==============================================" -ForegroundColor Cya
 Write-Host "   DOWNLOADING MULTI-PART GOOGLE DRIVE BUNDLE" -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
 
-# 3. Download Google Drive Files using gdown (fuzzy flag removed)
+# 3. Download Google Drive Files into staging
 foreach ($url in $Urls) {
     if ([string]::IsNullOrWhiteSpace($url)) { continue }
 
@@ -56,7 +56,6 @@ foreach ($url in $Urls) {
     $driveUrl = "https://drive.google.com/uc?id=$fileId"
     Write-Host "Downloading Google Drive File ID [$fileId]..." -ForegroundColor Yellow
     
-    # Target directory path for gdown without trailing slash issues
     Invoke-Checked "gdown download for $fileId" {
         python -m gdown $driveUrl -O "$stage/"
     }
@@ -69,18 +68,31 @@ if ($downloadedFiles.Count -eq 0) {
 
 if (!(Test-Path $DestRoot)) { New-Item -ItemType Directory -Path $DestRoot -Force | Out-Null }
 
-# 4. Extract Primary Volume via 7-Zip
-Write-Host "Extracting primary archive volume to $DestRoot..." -ForegroundColor Gray
+# 4. Extract ALL Standalone & Primary Volume Archives
+Write-Host "==============================================" -ForegroundColor Cyan
+Write-Host "   EXTRACTING DOWNLOADED ARCHIVES TO $DestRoot" -ForegroundColor Cyan
+Write-Host "==============================================" -ForegroundColor Cyan
 
-# Find the primary split archive (.001, .zip, .7z, .rar)
-$primaryArchive = $downloadedFiles | Where-Object { 
-    $_.Extension -match "\.(zip|7z|rar|exe)$" -or $_.Name -match "\.(001|part1\.rar|z01)$" 
-} | Select-Object -First 1
+# Identify standalone archives and primary split parts (.001, .part1.rar, .zip, .7z)
+# Exclude secondary split volumes (.002+, .part2.rar+, .z02+) as 7-Zip handles those automatically
+$archivesToExtract = $downloadedFiles | Where-Object {
+    $_.Name -notmatch "\.(00[2-9]|0[1-9][0-9]|[1-9][0-9][0-9])$" -and
+    $_.Name -notmatch "\.part(0*[2-9]|[1-9][0-9]+)\.rar$" -and
+    $_.Name -notmatch "\.z(0*[2-9]|[1-9][0-9]+)$" -and
+    ($_.Extension -match "\.(zip|7z|rar|exe)$" -or $_.Name -match "\.001$")
+}
 
-if (-not $primaryArchive) { $primaryArchive = $downloadedFiles[0] }
+if ($archivesToExtract.Count -eq 0) {
+    # Fallback if pattern matching doesn't hit: attempt extraction on all downloaded files
+    $archivesToExtract = $downloadedFiles
+}
 
-Invoke-Checked "7z extraction of $($primaryArchive.Name)" {
-    & $SevenZipPath x "$($primaryArchive.FullName)" "-o$DestRoot" "-p$ArchivePassword" -y
+foreach ($arc in $archivesToExtract) {
+    Write-Host "Extracting archive: $($arc.Name) -> $DestRoot..." -ForegroundColor Gray
+    
+    Invoke-Checked "7z extraction of $($arc.Name)" {
+        & $SevenZipPath x "$($arc.FullName)" "-o$DestRoot" "-p$ArchivePassword" -y
+    }
 }
 
 # 5. Extract Nested Password-Protected Inner Archives
@@ -97,13 +109,13 @@ foreach ($arc in $innerArchives) {
     Remove-Item $arc.FullName -Force -ErrorAction SilentlyContinue
 }
 
-# 6. Check that extraction produced files
+# 6. Verify Files Landed in Target Path
 $installedCount = (Get-ChildItem -Path $DestRoot -Recurse -File -ErrorAction SilentlyContinue).Count
 if ($installedCount -eq 0) {
-    throw "Extraction reported success but $DestRoot is empty. Check archive password or integrity."
+    throw "Extraction reported success but $DestRoot is empty. Check archive password or file integrity."
 }
 
-# Clean staging area
+# Cleanup Stage Directory
 Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
 
 # 7. Add D:\Software to System PATH
