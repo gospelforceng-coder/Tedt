@@ -13,9 +13,7 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 if (!$ReWinRoot) { $ReWinRoot = Join-Path $scriptDir "..\tools\ReWin" }
 if (Test-Path $ReWinRoot) { $ReWinRoot = (Resolve-Path $ReWinRoot).Path }
 
-if (!(Get-Command rclone -ErrorAction SilentlyContinue)) {
-    throw "rclone is not installed."
-}
+if (!(Get-Command rclone -ErrorAction SilentlyContinue)) { throw "rclone is not installed." }
 
 function New-Directory {
     param([string]$Path)
@@ -41,96 +39,22 @@ New-Directory $LocalRoot
 Write-Host "[1/7] Checking checkpoint..." -ForegroundColor Yellow
 $currentPath = Join-Path $LocalRoot "current.json"
 & rclone copyto "$RemoteRoot/current.json" $currentPath --quiet
-
 if ($LASTEXITCODE -ne 0 -or !(Test-Path $currentPath)) {
     Write-Host "No persistent checkpoint exists. Fresh start." -ForegroundColor Cyan
     exit 0
 }
-
 $current = Get-Content $currentPath -Raw | ConvertFrom-Json
 if ($current.status -ne "READY") { throw "Checkpoint is not READY." }
-
 $generation = "{0:D6}" -f [int]$current.generation
 $generationDir = Join-Path $LocalRoot $generation
 New-Directory $generationDir
 
-# 2. Download Checkpoint (direct folder sync, parallelized - no zip step)
+# 2. Download checkpoint
 Write-Host "[2/7] Downloading checkpoint $generation..." -ForegroundColor Yellow
 & rclone copy "$RemoteRoot/generations/$generation" $generationDir --transfers 16 --checkers 16 --progress
 
-# 3. Validate Checkpoint
-Write-Host "[3/7] Validating checkpoint..." -ForegroundColor Yellow
-$requiredFiles = @("checkpoint.json", "software-state.json", "rewin\migration_package.json")
-foreach ($file in $requiredFiles) {
-    if (!(Test-Path (Join-Path $generationDir $file))) {
-        throw "Required checkpoint file missing: $file"
-    }
-}
-
-# 4. Restore Portable Apps (D:\Software)
-Write-Host "[4/7] Restoring portable applications..." -ForegroundColor Yellow
-$portableSource = Join-Path $generationDir "installed-tools\Software"
-if (Test-Path $portableSource) {
-    if (!(Test-Path "D:\Software")) { New-Item -ItemType Directory -Path "D:\Software" -Force | Out-Null }
-    Copy-Tree $portableSource "D:\Software"
-    $env:Path += ";D:\Software"
-    [System.Environment]::SetEnvironmentVariable("Path", $env:Path, [System.EnvironmentVariableTarget]::Machine)
-}
-
-# 5. Install Software via Winget & Choco
-Write-Host "[5/7] Restoring package-managed software..." -ForegroundColor Yellow
-$softwareState = Get-Content (Join-Path $generationDir "software-state.json") -Raw | ConvertFrom-Json
-
-$installedWinget = ""
-try { $installedWinget = winget list --accept-source-agreements 2>$null | Out-String } catch {}
-
-foreach ($app in $softwareState) {
-    if ($app.wingetId) {
-        if ($installedWinget -and $installedWinget.Contains($app.wingetId)) {
-            Write-Host "Skipping $($app.name) - Already installed." -ForegroundColor Gray
-            continue
-        }
-        Write-Host "Installing $($app.name) [$($app.wingetId)] via Winget..." -ForegroundColor Gray
-        winget install --id $app.wingetId --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity --silent
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "  Winget install returned exit code $LASTEXITCODE for $($app.name)" -ForegroundColor Yellow
-        }
-        continue
-    }
-    if ($app.chocolateyId -and (Get-Command choco -ErrorAction SilentlyContinue)) {
-        Write-Host "Installing $($app.name) via Choco..." -ForegroundColor Gray
-        choco install $app.chocolateyId -y
-        continue
-    }
-}
-
-# 6. Restore User Configuration & Auto-Run Custom Installers as RDP User
-Write-Host "[6/7] Restoring RDP user configuration & running installers..." -ForegroundColor Yellow
-$userScript = Join-Path $scriptDir "restore-user.ps1"
-$packagePath = Join-Path $generationDir "rewin"
-$installersFolder = Join-Path $generationDir "installed-tools\installers"
-
-$taskName = "RDP-State-Restore-$generation"
-$taskArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$userScript`" -PackagePath `"$packagePath`" -ReWinRoot `"$ReWinRoot`" -InstallersPath `"$installersFolder`""
-
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $taskArgs
-$principal = New-ScheduledTaskPrincipal -UserId $UserName -LogonType Password -RunLevel Highest
-
-$task = New-ScheduledTask -Action $action -Principal $principal
-Register-ScheduledTask -TaskName $taskName -InputObject $task -Force -User $UserName -Password $UserPassword | Out-Null
-Start-ScheduledTask -TaskName $taskName
-
-$timeout = 1200
-$timer = [Diagnostics.Stopwatch]::StartNew()
-while ($timer.Elapsed.TotalSeconds -lt $timeout) {
-    $info = Get-ScheduledTaskInfo -TaskName $taskName
-    if ($info.LastRunTime -gt [datetime]::MinValue -and $info.State -eq "Ready") { break }
-    Start-Sleep -Seconds 5
-}
-Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
-
-# 7. Restore User Data Files
-Write-Host "[7/7] Restoring user files..." -ForegroundColor Yellow
+# 3. Restore plain user files
+Write-Host "[3/7] Restoring user files and portable software..." -ForegroundColor Yellow
 $profile = "C:\Users\$UserName"
 $userData = Join-Path $generationDir "user-data"
 $restoreMap = @{
@@ -141,7 +65,6 @@ $restoreMap = @{
     Videos    = Join-Path $profile "Videos"
     Projects  = Join-Path $profile "Projects"
 }
-
 foreach ($name in $restoreMap.Keys) {
     $source = Join-Path $userData $name
     if (Test-Path $source) {
@@ -150,6 +73,87 @@ foreach ($name in $restoreMap.Keys) {
     }
 }
 
+# Restore portable software to D:\Software
+$portableSource = Join-Path $generationDir "installed-tools\Software"
+if (Test-Path $portableSource) {
+    if (!(Test-Path "D:\Software")) { New-Item -ItemType Directory -Path "D:\Software" -Force | Out-Null }
+    Write-Host "Restoring software binaries to D:\Software..." -ForegroundColor Gray
+    Copy-Tree $portableSource "D:\Software"
+    
+    $sysPath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+    if ($sysPath -notlike "*D:\Software*") {
+        [System.Environment]::SetEnvironmentVariable("Path", "$sysPath;D:\Software", "Machine")
+        $env:Path += ";D:\Software"
+    }
+}
+
+# 4. Install software from the delta list
+Write-Host "[4/7] Installing user-added software via winget..." -ForegroundColor Yellow
+$deltaPath = Join-Path $generationDir "software-delta.json"
+if (Test-Path $deltaPath) {
+    $delta = Get-Content $deltaPath -Raw | ConvertFrom-Json
+    $manualLog = "D:\RDPState\manual-install-needed.txt"
+
+    $jobs = foreach ($app in ($delta | Where-Object { $_.resolved })) {
+        Write-Host "Queuing $($app.name) [$($app.wingetId)]..." -ForegroundColor Gray
+        Start-Job -ScriptBlock {
+            param($id)
+            winget install --id $id --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity --silent --force
+        } -ArgumentList $app.wingetId
+    }
+    if ($jobs) {
+        $jobs | Wait-Job | Out-Null
+        $jobs | Receive-Job
+        $jobs | Remove-Job
+    }
+
+    foreach ($app in ($delta | Where-Object { -not $_.resolved })) {
+        Write-Host "No winget match for $($app.name) - flagging for manual install" -ForegroundColor Yellow
+        Add-Content -Path $manualLog -Value $app.name
+    }
+}
+
+# 5. Restore AppData
+Write-Host "[5/7] Restoring app data (presets, configs, login sessions)..." -ForegroundColor Yellow
+$appDataRoamingSource = Join-Path $userData "AppDataRoaming"
+if (Test-Path $appDataRoamingSource) {
+    Copy-Tree $appDataRoamingSource (Join-Path $profile "AppData\Roaming")
+}
+$appDataLocalSource = Join-Path $userData "AppDataLocal"
+if (Test-Path $appDataLocalSource) {
+    Get-ChildItem $appDataLocalSource -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        Write-Host "Restoring AppData\Local\$($_.Name)..." -ForegroundColor Gray
+        Copy-Tree $_.FullName (Join-Path $profile "AppData\Local\$($_.Name)")
+    }
+}
+
+# 6. Restore ReWin config
+Write-Host "[6/7] Restoring ReWin configuration..." -ForegroundColor Yellow
+$packagePath = Join-Path $generationDir "rewin"
+if (Test-Path (Join-Path $packagePath "migration_package.json")) {
+    $userScript = Join-Path $scriptDir "restore-user.ps1"
+    $taskName = "RDP-State-Restore-$generation"
+    $taskArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$userScript`" -PackagePath `"$packagePath`" -ReWinRoot `"$ReWinRoot`""
+    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $taskArgs
+    $principal = New-ScheduledTaskPrincipal -UserId $UserName -LogonType Password -RunLevel Highest
+    $task = New-ScheduledTask -Action $action -Principal $principal
+    Register-ScheduledTask -TaskName $taskName -InputObject $task -Force -User $UserName -Password $UserPassword | Out-Null
+    Start-ScheduledTask -TaskName $taskName
+
+    $timeout = 600
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    while ($timer.Elapsed.TotalSeconds -lt $timeout) {
+        $info = Get-ScheduledTaskInfo -TaskName $taskName
+        if ($info.LastRunTime -gt [datetime]::MinValue -and $info.State -eq "Ready") { break }
+        Start-Sleep -Seconds 5
+    }
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+}
+
+Write-Host "[7/7] Done." -ForegroundColor Yellow
 Write-Host "==============================================" -ForegroundColor Green
 Write-Host "       RDP RESTORE COMPLETED: $generation" -ForegroundColor Green
 Write-Host "==============================================" -ForegroundColor Green
+if (Test-Path "D:\RDPState\manual-install-needed.txt") {
+    Write-Host "Some apps need manual install - see D:\RDPState\manual-install-needed.txt" -ForegroundColor Yellow
+}
