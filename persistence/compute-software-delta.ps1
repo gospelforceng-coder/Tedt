@@ -1,3 +1,6 @@
+# ==================================================
+# compute-software-delta.ps1
+# ==================================================
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$BaselinePath,
@@ -21,6 +24,17 @@ function Parse-WingetLine {
     return $null
 }
 
+# winget prints a synthetic "ARP\..." path in the Id column for programs it
+# only detected via Add/Remove Programs (no real winget source/catalog entry).
+# That string is NOT installable via `winget install --id`, so it must never
+# be trusted as a resolved ID - it has to go through name-based search instead.
+function Test-IsRealWingetId {
+    param([string]$Id)
+    if ([string]::IsNullOrWhiteSpace($Id)) { return $false }
+    if ($Id -match '^ARP\\') { return $false }
+    return $true
+}
+
 $excludedNames = @()
 if ($ExclusionListPath -and (Test-Path $ExclusionListPath)) {
     $excludedNames = @((Get-Content $ExclusionListPath -Raw | ConvertFrom-Json).excludedAppNames | ForEach-Object { $_.ToLower() })
@@ -37,10 +51,20 @@ function Test-IsExcluded {
 $baseline = Get-Content $BaselinePath -Raw | ConvertFrom-Json
 $current  = Get-Content $CurrentPath -Raw | ConvertFrom-Json
 
+if (-not ($baseline.PSObject.Properties.Name -contains 'wingetList') -or
+    -not ($baseline.PSObject.Properties.Name -contains 'registrySoftware')) {
+    throw "Baseline at $BaselinePath is missing wingetList/registrySoftware - it was not produced by scan-software-state.ps1's schema. Re-run capture-baseline.ps1 before computing a delta, or everything on the system will look 'new'."
+}
+
 # --- Winget-based delta ---
 $baselineWingetIds = @($baseline.wingetList | ForEach-Object { Parse-WingetLine $_ } | Where-Object { $_ } | Select-Object -ExpandProperty Id)
 $currentWingetEntries = @($current.wingetList | ForEach-Object { Parse-WingetLine $_ } | Where-Object { $_ })
-$newWingetApps = $currentWingetEntries | Where-Object { $_.Id -notin $baselineWingetIds -and -not (Test-IsExcluded $_.Name) }
+
+# Split current winget entries into ones with a real catalog ID vs ARP-only
+# pseudo-IDs. Only real IDs can skip straight to "resolved".
+$newWingetEntries = $currentWingetEntries | Where-Object { $_.Id -notin $baselineWingetIds -and -not (Test-IsExcluded $_.Name) }
+$newWingetApps        = $newWingetEntries | Where-Object { Test-IsRealWingetId $_.Id }
+$newWingetNeedsSearch = $newWingetEntries | Where-Object { -not (Test-IsRealWingetId $_.Id) }
 
 # --- Registry-based delta (catches non-winget installs) ---
 $baselineNames = @($baseline.registrySoftware | ForEach-Object { $_.DisplayName }) | Where-Object { $_ }
@@ -49,31 +73,37 @@ $newRegistryApps = $currentRegistry | Where-Object {
     $_.DisplayName -and ($_.DisplayName -notin $baselineNames) -and -not (Test-IsExcluded $_.DisplayName)
 }
 
-$alreadyCoveredNames = @($newWingetApps | ForEach-Object { $_.Name.ToLower() })
 $delta = @()
 $skipped = @()
 
+# Apps with a real, directly-installable winget ID
 foreach ($app in $newWingetApps) {
     $delta += [ordered]@{ name = $app.Name; wingetId = $app.Id; resolved = $true; matchType = "winget-list" }
 }
 
-foreach ($app in $newRegistryApps) {
-    $cleanName = ($app.DisplayName.ToLower() -replace '[^a-z0-9]', '')
-    $alreadyHandled = $alreadyCoveredNames | Where-Object {
-        ($_ -replace '[^a-z0-9]', '') -match [regex]::Escape($cleanName.Substring(0, [Math]::Min(6, $cleanName.Length)))
-    }
-    if ($alreadyHandled) { continue }
+# Everything else that needs a name-based winget search: ARP-only winget-list
+# entries (like Android Studio) plus registry-only entries. Combine and dedupe
+# by cleaned name so the same app doesn't get searched/queued twice.
+$namesNeedingSearch = @()
+$namesNeedingSearch += $newWingetNeedsSearch | ForEach-Object { [pscustomobject]@{ Name = $_.Name } }
+$namesNeedingSearch += $newRegistryApps | ForEach-Object { [pscustomobject]@{ Name = $_.DisplayName } }
 
-    Write-Host "Searching winget for match: $($app.DisplayName)..." -ForegroundColor Gray
+$seenClean = @{}
+foreach ($app in $namesNeedingSearch) {
+    $cleanName = ($app.Name.ToLower() -replace '[^a-z0-9]', '')
+    if ($seenClean.ContainsKey($cleanName)) { continue }
+    $seenClean[$cleanName] = $true
+
+    Write-Host "Searching winget for match: $($app.Name)..." -ForegroundColor Gray
     $wingetId = $null
     try {
-        $searchResult = winget search --name "$($app.DisplayName)" --accept-source-agreements 2>$null
+        $searchResult = winget search --name "$($app.Name)" --accept-source-agreements 2>$null
         $parsedResults = @($searchResult | ForEach-Object { Parse-WingetLine $_ } | Where-Object { $_ })
         if ($parsedResults.Count -gt 0) { $wingetId = $parsedResults[0].Id }
     } catch {}
 
     $delta += [ordered]@{
-        name      = $app.DisplayName
+        name      = $app.Name
         wingetId  = $wingetId
         resolved  = [bool]$wingetId
         matchType = if ($wingetId) { "winget-search" } else { "unresolved" }
