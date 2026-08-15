@@ -129,11 +129,7 @@ jobs:
 
           # 2. Download and unpack multi-part Google Drive files to D:\Software
           $driveUrls = @(
-            "https://drive.google.com/file/d/1r6vukCciIE32V1qGdLEqr5KauFaiMZte/view?usp=drivesdk",
-            "https://drive.google.com/file/d/1Np16vmK9S35a73o74O-nuAWIH-CjlKxa/view?usp=drivesdk",
-            "https://drive.google.com/file/d/1q57S-1w8yKdxtBr_5HpRgVHO3mKc-ITF/view?usp=drivesdk",
-            "https://drive.google.com/file/d/1dGEsc-2JzA8TaOG_NHUUmTqoFHcUxqzw/view?usp=drivesdk",
-             "https://drive.google.com/file/d/1OzIs5_vSfKIEnDa6ABa57gdt2MZcflu1/view?usp=drivesdk"
+             "https://drive.google.com/file/d/1dGEsc-2JzA8TaOG_NHUUmTqoFHcUxqzw/view?usp=drivesdk"
           )
 
           $cloudAppScript = Join-Path $env:GITHUB_WORKSPACE "persistence\install-cloud-apps.ps1"
