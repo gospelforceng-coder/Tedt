@@ -33,13 +33,13 @@ function Copy-Tree {
     param([string]$Source, [string]$Destination)
     if (!(Test-Path $Source)) { return }
     New-Directory $Destination
-    robocopy $Source $Destination /E /XJ /R:1 /W:1 /MT:32 /NP /NFL /NDL /XD "Temp" "tmp" "Cache" "Caches" "Code Cache" "GPUCache" "CrashDumps" "node_modules" ".git" "Service Worker" "blob_storage" | Out-Null
+    # Backs up all user files from C: (including .zip, .iso, .rar), excluding only junk/cache folders
+    robocopy $Source $Destination /E /XJ /R:1 /W:1 /MT:32 /NP /NFL /NDL `
+        /XD "Temp" "tmp" "Cache" "Caches" "Code Cache" "GPUCache" "CrashDumps" "node_modules" ".git" "Service Worker" "blob_storage" | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "Robocopy failed on $Source" }
 }
 
-# Folders under AppData\Local that are always skipped regardless of baseline,
-# since they're OS/browser caches already handled elsewhere (ReWin config
-# restore covers browser_chrome/browser_firefox) or are pure driver/OS cache.
+# Folders under C:\Users\<User>\AppData\Local that are always skipped regardless of baseline
 $alwaysSkipLocalFolders = @(
     "Microsoft", "Google", "Mozilla", "Packages", "Temp",
     "D3DSCache", "NVIDIA", "NVIDIA Corporation", "Package Cache",
@@ -93,12 +93,12 @@ Write-Host "==============================================" -ForegroundColor Cya
 Write-Host "       CREATING CHECKPOINT $generationName" -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
 
-# 1. Capture current software state (registry + winget + choco)
+# 1. Capture current software state
 Write-Host "[1/5] Scanning current software state..." -ForegroundColor Yellow
 $currentStatePath = Join-Path $stage "current-software-state.json"
 & (Join-Path $scriptDir "scan-software-state.ps1") -OutputPath $currentStatePath
 
-# 2. Compute delta against baseline (excludes pre-installed + your manual-install list)
+# 2. Compute delta against baseline
 Write-Host "[2/5] Computing software delta..." -ForegroundColor Yellow
 $deltaPath = Join-Path $stage "software-delta.json"
 & (Join-Path $scriptDir "compute-software-delta.ps1") `
@@ -107,8 +107,8 @@ $deltaPath = Join-Path $stage "software-delta.json"
     -OutputPath $deltaPath `
     -ExclusionListPath $ExclusionListPath
 
-# 3. Copy user files - unconditional, no installer-filtering logic.
-Write-Host "[3/5] Backing up user files and presets..." -ForegroundColor Yellow
+# 3. Copy user profile directories from C:\ drive
+Write-Host "[3/5] Backing up C:\ user files, presets, and archives..." -ForegroundColor Yellow
 $profile = "C:\Users\$UserName"
 $paths = @{
     Desktop        = Join-Path $profile "Desktop"
@@ -125,12 +125,8 @@ foreach ($name in $paths.Keys) {
     }
 }
 
-# 3b. Copy AppData\Local, but ONLY folders belonging to apps that are NOT
-# part of the baseline (pre-installed on first boot). Baseline apps' Local
-# folders are dev-tool caches/metadata (Unity, MongoDB, NuGet, .NET SDKs,
-# etc.) - large, not needed, and never restored anyway since those apps
-# aren't reinstalled by the delta process.
-Write-Host "[3b/5] Backing up AppData\Local for user-added apps..." -ForegroundColor Yellow
+# 3b. Copy user-added AppData\Local from C:\ drive
+Write-Host "[3b/5] Backing up C:\ AppData\Local for user-added apps..." -ForegroundColor Yellow
 $localAppData = Join-Path $profile "AppData\Local"
 if (Test-Path $localAppData) {
     $baselineTokens = Get-BaselineNameTokens -BaselinePath $BaselinePath
@@ -138,9 +134,7 @@ if (Test-Path $localAppData) {
 
     Get-ChildItem $localAppData -Directory -ErrorAction SilentlyContinue | ForEach-Object {
         $folder = $_
-        if ($folder.Name -in $alwaysSkipLocalFolders) {
-            return
-        }
+        if ($folder.Name -in $alwaysSkipLocalFolders) { return }
         if (Test-MatchesBaselineApp -FolderName $folder.Name -BaselineTokens $baselineTokens) {
             Write-Host "Skipping AppData\Local\$($folder.Name) - baseline app" -ForegroundColor DarkGray
             return
@@ -150,12 +144,9 @@ if (Test-Path $localAppData) {
     }
 }
 
-if (Test-Path "D:\Software") {
-    Write-Host "Backing up portable applications from D:\Software..." -ForegroundColor Gray
-    Copy-Tree "D:\Software" (Join-Path $stage "installed-tools\Software")
-}
+# (NOTE: D:\ drive backing up is completely omitted here)
 
-# 4. Run ReWin config scan (browser configs, vscode, git, terminal, etc.)
+# 4. Run ReWin config scan (browser configs, VS Code, Git, Terminal from C:\)
 Write-Host "[4/5] Running ReWin scanner..." -ForegroundColor Yellow
 $scanner = Join-Path $ReWinRoot "src\scanner\main_scanner.ps1"
 if (Test-Path $scanner) {
@@ -191,7 +182,7 @@ $manifest = [ordered]@{
 }
 $manifest | ConvertTo-Json -Depth 12 | Set-Content (Join-Path $stage "checkpoint.json") -Encoding UTF8
 
-# 5. Publish checkpoint - direct folder sync, no zip step
+# 5. Publish checkpoint
 Write-Host "[5/5] Publishing checkpoint..." -ForegroundColor Yellow
 & rclone copy $stage "$RemoteRoot/generations/$generationName" --transfers 16 --checkers 16 --quiet
 
