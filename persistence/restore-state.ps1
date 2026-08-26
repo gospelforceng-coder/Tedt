@@ -87,7 +87,7 @@ if (Test-Path $portableSource) {
     }
 }
 
-# 4. Install software from the delta list
+# 4. Install software from the delta list (Safe Non-blocking Execution)
 Write-Host "[4/7] Installing user-added software via winget..." -ForegroundColor Yellow
 $deltaPath = Join-Path $generationDir "software-delta.json"
 if (Test-Path $deltaPath) {
@@ -98,13 +98,14 @@ if (Test-Path $deltaPath) {
         Write-Host "Queuing $($app.name) [$($app.wingetId)]..." -ForegroundColor Gray
         Start-Job -ScriptBlock {
             param($id)
-            winget install --id $id --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity --silent --force
+            $ErrorActionPreference = "SilentlyContinue"
+            winget install --id $id --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity --silent --force 2>&1 | Out-Null
         } -ArgumentList $app.wingetId
     }
     if ($jobs) {
         $jobs | Wait-Job | Out-Null
-        $jobs | Receive-Job
-        $jobs | Remove-Job
+        $jobs | Receive-Job -ErrorAction SilentlyContinue | Out-Null
+        $jobs | Remove-Job -Force
     }
 
     foreach ($app in ($delta | Where-Object { -not $_.resolved })) {
