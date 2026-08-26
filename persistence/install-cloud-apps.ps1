@@ -1,6 +1,15 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory=$true)][string[]]$Urls,
+    [Parameter(Mandatory=$false)]
+    [string[]]$Urls = @(
+        "https://drive.google.com/file/d/1dGEsc-2JzA8TaOG_NHUUmTqoFHcUxqzw/view?usp=drivesdk",
+        "https://drive.google.com/file/d/1yqBWQSH2RY9gz7ZCE2J16k6j77z2owhI/view?usp=drivesdk",
+        "https://drive.google.com/file/d/1OzIs5_vSfKIEnDa6ABa57gdt2MZcflu1/view?usp=drivesdk",
+        "https://drive.google.com/file/d/1q57S-1w8yKdxtBr_5HpRgVHO3mKc-ITF/view?usp=drivesdk",
+        "https://drive.google.com/file/d/1r6vukCciIE32V1qGdLEqr5KauFaiMZte/view?usp=drivesdk",
+        "https://drive.google.com/file/d/1fejroZdX_wszMFle9EUXDpnTwgpZ5Ntd/view?usp=drivesdk",
+        "https://drive.google.com/file/d/1Np16vmK9S35a73o74O-nuAWIH-CjlKxa/view?usp=drivesdk"
+    ),
     [string]$DestRoot = "D:\Software",
     [string]$ArchivePassword = "123",
     [string]$SevenZipPath = "C:\Program Files\7-Zip\7z.exe"
