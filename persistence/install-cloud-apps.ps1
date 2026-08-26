@@ -1,15 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory=$false)]
-    [string[]]$Urls = @(
-        "https://drive.google.com/file/d/1dGEsc-2JzA8TaOG_NHUUmTqoFHcUxqzw/view?usp=drivesdk",
-        "https://drive.google.com/file/d/1yqBWQSH2RY9gz7ZCE2J16k6j77z2owhI/view?usp=drivesdk",
-        "https://drive.google.com/file/d/1OzIs5_vSfKIEnDa6ABa57gdt2MZcflu1/view?usp=drivesdk",
-        "https://drive.google.com/file/d/1q57S-1w8yKdxtBr_5HpRgVHO3mKc-ITF/view?usp=drivesdk",
-        "https://drive.google.com/file/d/1r6vukCciIE32V1qGdLEqr5KauFaiMZte/view?usp=drivesdk",
-        "https://drive.google.com/file/d/1fejroZdX_wszMFle9EUXDpnTwgpZ5Ntd/view?usp=drivesdk",
-        "https://drive.google.com/file/d/1Np16vmK9S35a73o74O-nuAWIH-CjlKxa/view?usp=drivesdk"
-    ),
+    [Parameter(Mandatory=$true)][string[]]$Urls,
     [string]$DestRoot = "D:\Software",
     [string]$ArchivePassword = "123",
     [string]$SevenZipPath = "C:\Program Files\7-Zip\7z.exe"
@@ -49,32 +40,28 @@ Write-Host "==============================================" -ForegroundColor Cya
 Write-Host "   DOWNLOADING MULTI-PART GOOGLE DRIVE BUNDLE" -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
 
-# 3. Download Google Drive Files into staging with unique output names
-$counter = 1
+# 3. Download Google Drive Files into staging
 foreach ($url in $Urls) {
     if ([string]::IsNullOrWhiteSpace($url)) { continue }
 
-    Write-Host "[$counter/$($Urls.Count)] Downloading file from URL..." -ForegroundColor Yellow
-    
-    # Save to a unique indexed filename initially to avoid overwriting multi-part files
-    $targetFilePath = Join-Path $stage "part_$counter.tmp"
-    
-    try {
-        # Using --fuzzy lets gdown extract file IDs directly from standard web view links
-        python -m gdown "$url" --fuzzy -O "$targetFilePath"
-    } catch {
-        # Fixed: Escaped variable name ${counter} to prevent parser error with trailing colon
-        Write-Host "[WARNING] Failed to download link #${counter}: $url" -ForegroundColor Red
+    $fileId = $null
+    if ($url -match "file/d/([^/]+)") {
+        $fileId = $Matches[1]
+    } elseif ($url -match "id=([^&]+)") {
+        $fileId = $Matches[1]
+    } else {
+        $fileId = $url.Trim()
     }
+
+    $driveUrl = "https://drive.google.com/uc?id=$fileId"
+    Write-Host "Downloading Google Drive File ID [$fileId]..." -ForegroundColor Yellow
     
-    $counter++
+    Invoke-Checked "gdown download for $fileId" {
+        python -m gdown $driveUrl -O "$stage/"
+    }
 }
 
-# Rename downloaded files back to their original names if gdown preserved metadata, 
-# or clean up stage structure
 $downloadedFiles = Get-ChildItem -Path $stage -File | Sort-Object Name
-Write-Host "[OK] Total files successfully downloaded to staging: $($downloadedFiles.Count)" -ForegroundColor Green
-
 if ($downloadedFiles.Count -eq 0) {
     throw "No files were downloaded into $stage - check Google Drive permissions or links."
 }
@@ -86,23 +73,26 @@ Write-Host "==============================================" -ForegroundColor Cya
 Write-Host "   EXTRACTING DOWNLOADED ARCHIVES TO $DestRoot" -ForegroundColor Cyan
 Write-Host "==============================================" -ForegroundColor Cyan
 
-# Identify primary volume archives (.001, .part1.rar, .zip, .7z) or attempt direct extraction
+# Identify standalone archives and primary split parts (.001, .part1.rar, .zip, .7z)
+# Exclude secondary split volumes (.002+, .part2.rar+, .z02+) as 7-Zip handles those automatically
 $archivesToExtract = $downloadedFiles | Where-Object {
     $_.Name -notmatch "\.(00[2-9]|0[1-9][0-9]|[1-9][0-9][0-9])$" -and
     $_.Name -notmatch "\.part(0*[2-9]|[1-9][0-9]+)\.rar$" -and
     $_.Name -notmatch "\.z(0*[2-9]|[1-9][0-9]+)$" -and
-    ($_.Extension -match "\.(zip|7z|rar|exe|tmp)$" -or $_.Name -match "\.001$")
+    ($_.Extension -match "\.(zip|7z|rar|exe)$" -or $_.Name -match "\.001$")
 }
 
 if ($archivesToExtract.Count -eq 0) {
+    # Fallback if pattern matching doesn't hit: attempt extraction on all downloaded files
     $archivesToExtract = $downloadedFiles
 }
 
 foreach ($arc in $archivesToExtract) {
     Write-Host "Extracting archive: $($arc.Name) -> $DestRoot..." -ForegroundColor Gray
     
-    # 7-Zip handles split volumes automatically when pointing to part 1 or .001/.tmp files
-    & $SevenZipPath x "$($arc.FullName)" "-o$DestRoot" "-p$ArchivePassword" -y
+    Invoke-Checked "7z extraction of $($arc.Name)" {
+        & $SevenZipPath x "$($arc.FullName)" "-o$DestRoot" "-p$ArchivePassword" -y
+    }
 }
 
 # 5. Extract Nested Password-Protected Inner Archives
@@ -113,7 +103,9 @@ foreach ($arc in $innerArchives) {
     $targetDir = Join-Path $arc.DirectoryName $arc.BaseName
     Write-Host "Extracting inner archive: $($arc.Name) -> $targetDir" -ForegroundColor Gray
 
-    & $SevenZipPath x "$($arc.FullName)" "-o$targetDir" "-p$ArchivePassword" -y
+    Invoke-Checked "7z extraction of $($arc.Name)" {
+        & $SevenZipPath x "$($arc.FullName)" "-o$targetDir" "-p$ArchivePassword" -y
+    }
     Remove-Item $arc.FullName -Force -ErrorAction SilentlyContinue
 }
 
@@ -134,5 +126,3 @@ if ($currentPath -notlike "*$DestRoot*") {
     $env:Path += ";$DestRoot"
     Write-Host "[OK] Added $DestRoot to System PATH" -ForegroundColor Green
 }
-
-Write-Host "[OK] Multi-part software extraction complete at $DestRoot ($installedCount files)" -ForegroundColor Green
