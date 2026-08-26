@@ -129,7 +129,13 @@ jobs:
 
           # 2. Download and unpack multi-part Google Drive files to D:\Software
           $driveUrls = @(
-             "https://drive.google.com/file/d/1fejroZdX_wszMFle9EUXDpnTwgpZ5Ntd/view?usp=drivesdk"
+             "https://drive.google.com/file/d/1dGEsc-2JzA8TaOG_NHUUmTqoFHcUxqzw/view?usp=drivesdk",
+             "https://drive.google.com/file/d/1yqBWQSH2RY9gz7ZCE2J16k6j77z2owhI/view?usp=drivesdk",
+             "https://drive.google.com/file/d/1OzIs5_vSfKIEnDa6ABa57gdt2MZcflu1/view?usp=drivesdk",
+             "https://drive.google.com/file/d/1q57S-1w8yKdxtBr_5HpRgVHO3mKc-ITF/view?usp=drivesdk",
+             "https://drive.google.com/file/d/1r6vukCciIE32V1qGdLEqr5KauFaiMZte/view?usp=drivesdk",
+             "https://drive.google.com/file/d/1fejroZdX_wszMFle9EUXDpnTwgpZ5Ntd/view?usp=drivesdk",
+             "https://drive.google.com/file/d/1Np16vmK9S35a73o74O-nuAWIH-CjlKxa/view?usp=drivesdk"
           )
 
           $cloudAppScript = Join-Path $env:GITHUB_WORKSPACE "persistence\install-cloud-apps.ps1"
@@ -168,7 +174,7 @@ jobs:
             }    
 
             # Run state backup at 5.5 hours (330 mins)
-            if ($elapsed -ge 10) {    
+            if ($elapsed -ge 330) {    
               Write-Host "⏳ Cutoff reached. Executing ReWin Checkpoint Backup..." -ForegroundColor Yellow
               
               $backupScript = Join-Path $env:GITHUB_WORKSPACE "persistence\backup-state.ps1"
