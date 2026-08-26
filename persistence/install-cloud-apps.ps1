@@ -53,11 +53,15 @@ foreach ($url in $Urls) {
         $fileId = $url.Trim()
     }
 
-    $driveUrl = "https://drive.google.com/uc?id=$fileId"
     Write-Host "Downloading Google Drive File ID [$fileId]..." -ForegroundColor Yellow
     
-    Invoke-Checked "gdown download for $fileId" {
-        python -m gdown $driveUrl -O "$stage/"
+    # Try direct ID download first, fallback to raw URL
+    try {
+        python -m gdown --id "$fileId" -O "$stage/"
+        if ($LASTEXITCODE -ne 0) { throw "gdown returned code $LASTEXITCODE" }
+    } catch {
+        Write-Host "Direct ID download failed, trying fuzzy URL download..." -ForegroundColor Warning
+        python -m gdown "$url" -O "$stage/" --fuzzy
     }
 }
 
@@ -126,3 +130,5 @@ if ($currentPath -notlike "*$DestRoot*") {
     $env:Path += ";$DestRoot"
     Write-Host "[OK] Added $DestRoot to System PATH" -ForegroundColor Green
 }
+
+Write-Host "[OK] Multi-part software extraction complete at $DestRoot ($installedCount files)" -ForegroundColor Green
