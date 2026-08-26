@@ -63,7 +63,8 @@ foreach ($url in $Urls) {
         # Using --fuzzy lets gdown extract file IDs directly from standard web view links
         python -m gdown "$url" --fuzzy -O "$targetFilePath"
     } catch {
-        Write-Host "[WARNING] Failed to download link #$counter: $url" -ForegroundColor Red
+        # Fixed: Escaped variable name ${counter} to prevent parser error with trailing colon
+        Write-Host "[WARNING] Failed to download link #${counter}: $url" -ForegroundColor Red
     }
     
     $counter++
