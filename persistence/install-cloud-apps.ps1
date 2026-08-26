@@ -55,13 +55,13 @@ foreach ($url in $Urls) {
 
     Write-Host "Downloading Google Drive File ID [$fileId]..." -ForegroundColor Yellow
     
-    # Try direct ID download first, fallback to raw URL
-    try {
-        python -m gdown --id "$fileId" -O "$stage/"
-        if ($LASTEXITCODE -ne 0) { throw "gdown returned code $LASTEXITCODE" }
-    } catch {
-        Write-Host "Direct ID download failed, trying fuzzy URL download..." -ForegroundColor Warning
-        python -m gdown "$url" -O "$stage/" --fuzzy
+    # Pass direct ID or URL without unsupported flags
+    $downloadTarget = "https://drive.google.com/uc?id=$fileId"
+    python -m gdown $downloadTarget -O "$stage/"
+    
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Direct download attempt failed for $fileId. Retrying with raw URL..." -ForegroundColor Yellow
+        python -m gdown "$url" -O "$stage/"
     }
 }
 
